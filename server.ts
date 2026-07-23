@@ -1,0 +1,2639 @@
+import express from "express";
+import path from "path";
+import fs from "fs";
+import { createServer as createViteServer } from "vite";
+import { BeerLog, UserProfile, AppNotification, Pub, PubChatMessage } from "./src/types";
+import { normalizeBeerName } from "./src/data/beerCatalog";
+import { initializeApp } from "firebase/app";
+import { getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, query, orderBy, where, writeBatch, limit, onSnapshot, runTransaction } from "firebase/firestore";
+import { initializeApp as initializeAdminApp, getApps as getAdminApps, applicationDefault } from "firebase-admin/app";
+import { getMessaging } from "firebase-admin/messaging";
+
+const app = express();
+const PORT = 3000;
+
+app.use(express.json({ limit: "15mb" }));
+
+// --- FIRESTORE PERSISTENCE ---
+let db: any = null;
+let useFirestore = false;
+
+// Seed Initial User Profiles
+const DEFAULT_USERS: UserProfile[] = [
+  {
+    username: "Quin",
+    favoriteStyle: "IPA",
+    joinedDate: "2026-06-01",
+    avatar: "🍻",
+    bio: "Love dry-hopped double IPAs. Drinking in moderation... usually.",
+    password: "Pints!"
+  },
+  {
+    username: "Sam",
+    favoriteStyle: "Stout",
+    joinedDate: "2026-06-03",
+    avatar: "☕",
+    bio: "Stout season is all year round. The darker, the better.",
+    password: "Pints!"
+  },
+  {
+    username: "Alex",
+    favoriteStyle: "Sour",
+    joinedDate: "2026-06-05",
+    avatar: "🍋",
+    bio: "Sour and wild fermentation enthusiast. Can't resist a good Gose.",
+    password: "Pints!"
+  },
+  {
+    username: "Taylor",
+    favoriteStyle: "Pilsner",
+    joinedDate: "2026-06-10",
+    avatar: "🍺",
+    bio: "Keep it crispy. Dedicated lager and craft pilsner fan.",
+    password: "Pints!"
+  },
+  {
+    username: "Jordan",
+    favoriteStyle: "Hazy IPA",
+    joinedDate: "2026-06-15",
+    avatar: "🍊",
+    bio: "Juicy, tropical hazy IPAs are life. Citra & Mosaic hops please!",
+    password: "Pints!"
+  }
+];
+
+// Seed Initial Beer Logs
+const DEFAULT_BEERS: BeerLog[] = [
+  {
+    id: "log-1",
+    user: "Quin",
+    beerName: "Space Dust IPA",
+    beerStyle: "IPA",
+    abv: 8.2,
+    date: "2026-07-13T14:30:00.000Z",
+    rating: 5,
+    cheers: ["Sam", "Jordan"],
+    comment: "An absolute classic. Heavy citrus and pine notes."
+  },
+  {
+    id: "log-2",
+    user: "Sam",
+    beerName: "Bourbon County Stout",
+    beerStyle: "Stout",
+    abv: 14.7,
+    date: "2026-07-12T19:45:00.000Z",
+    rating: 5,
+    cheers: ["Quin"],
+    comment: "Incredibly rich, notes of vanilla, oak, and dark chocolate."
+  },
+  {
+    id: "log-3",
+    user: "Alex",
+    beerName: "Aura Peach Sour",
+    beerStyle: "Sour",
+    abv: 5.0,
+    date: "2026-07-11T21:15:00.000Z",
+    rating: 4,
+    cheers: ["Taylor", "Jordan"],
+    comment: "Tart, refreshing, with real peach puree flavor!"
+  },
+  {
+    id: "log-4",
+    user: "Taylor",
+    beerName: "Rothaus Pils",
+    beerStyle: "Pilsner",
+    abv: 5.1,
+    date: "2026-07-10T18:00:00.000Z",
+    rating: 5,
+    cheers: ["Quin", "Sam"],
+    comment: "The ultimate clean-crisp German pilsner."
+  },
+  {
+    id: "log-5",
+    user: "Jordan",
+    beerName: "Heady Topper",
+    beerStyle: "IPA",
+    abv: 8.0,
+    date: "2026-07-09T17:30:00.000Z",
+    rating: 5,
+    cheers: ["Quin", "Alex"],
+    comment: "Double Hazy IPA perfection. Unfiltered and unbelievably juicy."
+  },
+  {
+    id: "log-6",
+    user: "Quin",
+    beerName: "Guinness Draft",
+    beerStyle: "Stout",
+    abv: 4.2,
+    date: "2026-07-08T22:00:00.000Z",
+    rating: 4,
+    cheers: ["Sam"],
+    comment: "Always smooth. Perfect session drink."
+  },
+  {
+    id: "log-7",
+    user: "Alex",
+    beerName: "Focal Banger",
+    beerStyle: "IPA",
+    abv: 7.0,
+    date: "2026-07-07T16:00:00.000Z",
+    rating: 4,
+    cheers: ["Jordan", "Taylor"],
+    comment: "Great piney hop profile, very drinkable."
+  },
+  {
+    id: "log-8",
+    user: "Sam",
+    beerName: "Pliny the Elder",
+    beerStyle: "IPA",
+    abv: 8.0,
+    date: "2026-07-05T19:00:00.000Z",
+    rating: 5,
+    cheers: ["Quin", "Taylor", "Alex"],
+    comment: "The double IPA gold standard."
+  },
+  {
+    id: "log-9",
+    user: "Taylor",
+    beerName: "Miller Lite",
+    beerStyle: "Lager",
+    abv: 4.2,
+    date: "2026-07-03T20:30:00.000Z",
+    rating: 3,
+    cheers: [],
+    comment: "Hey, it's a hot day, and we're mowing the lawn!"
+  },
+  {
+    id: "log-10",
+    user: "Jordan",
+    beerName: "Juice Bomb",
+    beerStyle: "Hazy IPA",
+    abv: 6.5,
+    date: "2026-06-28T18:00:00.000Z",
+    rating: 4,
+    cheers: ["Quin"],
+    comment: "Super low bitterness, high tropical fruit notes."
+  },
+  {
+    id: "log-11",
+    user: "Quin",
+    beerName: "Two Hearted Ale",
+    beerStyle: "IPA",
+    abv: 7.0,
+    date: "2026-06-25T21:00:00.000Z",
+    rating: 5,
+    cheers: ["Sam", "Alex"],
+    comment: "Best single IPA in America. Consistent and classic Centennials."
+  },
+  {
+    id: "log-12",
+    user: "Sam",
+    beerName: "Milk Stout Nitro",
+    beerStyle: "Stout",
+    abv: 6.0,
+    date: "2026-06-20T17:00:00.000Z",
+    rating: 4,
+    cheers: ["Taylor"],
+    comment: "Creamy and sweet with lactose, super smooth."
+  },
+  {
+    id: "log-13",
+    user: "Alex",
+    beerName: "Duchesse de Bourgogne",
+    beerStyle: "Sour",
+    abv: 6.2,
+    date: "2026-06-18T19:30:00.000Z",
+    rating: 5,
+    cheers: ["Jordan"],
+    comment: "Incredible Flanders Red Ale. Tastes like balsamic, cherries, and oak."
+  },
+  {
+    id: "log-14",
+    user: "Taylor",
+    beerName: "Pilsner Urquell",
+    beerStyle: "Pilsner",
+    abv: 4.4,
+    date: "2026-06-15T20:00:00.000Z",
+    rating: 5,
+    cheers: ["Quin", "Jordan"],
+    comment: "The absolute original Pilsner. Soft bready malts and spicy Saaz hops."
+  }
+];
+
+function handleFirestoreError(err: any, context: string) {
+  const errMsg = err?.message || err?.toString() || "";
+  const errCode = err?.code || "";
+  const isQuotaOrUnavailable = 
+    errCode === "resource-exhausted" || 
+    errCode === "quota-exceeded" ||
+    errCode === "unavailable" ||
+    errCode === "permission-denied" ||
+    errCode === "unauthenticated" ||
+    errCode === "failed-precondition" ||
+    errMsg.toLowerCase().includes("quota") ||
+    errMsg.toLowerCase().includes("exhausted") ||
+    errMsg.toLowerCase().includes("unavailable") ||
+    errMsg.toLowerCase().includes("could not reach cloud firestore backend") ||
+    errMsg.toLowerCase().includes("operation could not be completed") ||
+    errMsg.toLowerCase().includes("offline");
+
+  if (isQuotaOrUnavailable) {
+    if (useFirestore) {
+      console.warn(`[Firestore] Connection unavailable or quota reached during ${context}. Gracefully switching server to local JSON storage files.`);
+      useFirestore = false;
+    }
+  } else {
+    console.error(`[Firestore] Failed during ${context}:`, err);
+  }
+}
+
+async function runWithTimeout<T>(promise: Promise<T>, timeoutMs = 2500, fallbackName = "Firestore operation"): Promise<T | null> {
+  let timer: NodeJS.Timeout | null = null;
+  const timeoutPromise = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      console.warn(`[Firestore] ${fallbackName} timed out after ${timeoutMs}ms. Continuing with local data.`);
+      resolve(null);
+    }, timeoutMs);
+  });
+  try {
+    const result = await Promise.race([promise, timeoutPromise]);
+    return result;
+  } catch (err) {
+    handleFirestoreError(err, fallbackName);
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function getFirestoreInstance(): any {
+  if (db !== null) return db;
+
+  try {
+    const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+    if (fs.existsSync(configPath)) {
+      const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+      if (config.projectId) {
+        const app = initializeApp(config);
+        db = getFirestore(app, config.firestoreDatabaseId || "(default)");
+        useFirestore = true;
+        console.log(`[Firestore] Initialized JS SDK with databaseId: ${config.firestoreDatabaseId}`);
+      }
+    }
+  } catch (err) {
+    console.error("[Firestore] Failed to initialize Firestore JS SDK, using JSON fallback:", err);
+    db = null;
+    useFirestore = false;
+  }
+  return db;
+}
+
+let fcmAvailable = false;
+let fcmPermissionDenied = false;
+try {
+  const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+  if (fs.existsSync(configPath)) {
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    initializeAdminApp({
+      projectId: config.projectId,
+      credential: applicationDefault()
+    });
+    fcmAvailable = true;
+    console.log("[FCM Server] Firebase Admin SDK initialized successfully with ADC.");
+  }
+} catch (err) {
+  console.log("[FCM Server] Firebase Admin SDK running in simulation mode:", err);
+}
+
+// Track sent notification IDs to prevent duplicate FCM push dispatches
+const pushedNotifIds = new Set<string>();
+
+// Helper to clean up invalid/expired tokens
+async function removeFcmToken(token: string) {
+  try {
+    const TOKENS_FILE = path.join(process.cwd(), "fcm_tokens.json");
+    if (fs.existsSync(TOKENS_FILE)) {
+      try {
+        let localTokens: any[] = JSON.parse(fs.readFileSync(TOKENS_FILE, "utf8"));
+        localTokens = localTokens.filter((t) => t.token !== token);
+        fs.writeFileSync(TOKENS_FILE, JSON.stringify(localTokens, null, 2));
+      } catch (e) {}
+    }
+    const firestore = getFirestoreInstance();
+    if (firestore && useFirestore) {
+      const docId = Buffer.from(token).toString("base64").substring(0, 50).replace(/[^a-zA-Z0-9]/g, "");
+      await deleteDoc(doc(firestore, "fcm_tokens", docId));
+    }
+    console.log(`[FCM Server] Removed invalid/expired token: ${token.substring(0, 10)}...`);
+  } catch (err) {
+    console.warn("[FCM Server] Could not remove token:", err);
+  }
+}
+
+// Get FCM tokens from Firestore or local JSON backup (case-insensitive username matching)
+async function getFcmTokens(username: string | null): Promise<string[]> {
+  const firestore = getFirestoreInstance();
+  const tokenSet = new Set<string>();
+  const targetLower = username ? username.toLowerCase().trim() : null;
+
+  // 1. Fetch from Firestore if available
+  if (firestore && useFirestore) {
+    try {
+      const coll = collection(firestore, "fcm_tokens");
+      const snap = await getDocs(coll);
+      snap.forEach((docSnap) => {
+        const data = docSnap.data() as any;
+        if (data && data.token) {
+          const tokenUser = (data.user || data.userLower || "").toString().toLowerCase().trim();
+          if (!targetLower || tokenUser === targetLower) {
+            tokenSet.add(data.token);
+          }
+        }
+      });
+    } catch (err) {
+      console.error("[FCM] Failed to fetch fcm tokens from Firestore:", err);
+    }
+  }
+
+  // 2. Fallback / merge local file tokens
+  const TOKENS_FILE = path.join(process.cwd(), "fcm_tokens.json");
+  if (fs.existsSync(TOKENS_FILE)) {
+    try {
+      const localTokens: any[] = JSON.parse(fs.readFileSync(TOKENS_FILE, "utf8"));
+      localTokens.forEach((t: any) => {
+        if (t && t.token) {
+          const tokenUser = (t.user || "").toString().toLowerCase().trim();
+          if (!targetLower || tokenUser === targetLower) {
+            tokenSet.add(t.token);
+          }
+        }
+      });
+    } catch (e) {
+      console.error("[FCM] Failed to read local tokens file:", e);
+    }
+  }
+
+  return Array.from(tokenSet);
+}
+
+// Safe helper to attempt sending an FCM message
+async function trySendFcmMessage(message: any): Promise<{ success: boolean; realFcmSent: boolean; error?: string }> {
+  if (!fcmAvailable) {
+    console.log(`[FCM Server] [SIMULATION MODE] Skipped real FCM API dispatch (FCM Admin SDK not authenticated or disabled). Target token: ${message.token?.substring(0, 10)}...`);
+    return { success: false, realFcmSent: false, error: "FCM_UNAVAILABLE" };
+  }
+  try {
+    const messageId = await getMessaging().send(message);
+    console.log(`[FCM Server] [REAL FCM API SUCCESS] Delivered message ID: ${messageId} via Firebase Admin SDK to token: ${message.token?.substring(0, 10)}...`);
+    return { success: true, realFcmSent: true };
+  } catch (err: any) {
+    const errorMsg = err?.message || String(err);
+    if (
+      errorMsg.includes("registration-token-not-registered") ||
+      errorMsg.includes("invalid-argument") ||
+      err?.code === "messaging/invalid-registration-token" ||
+      err?.code === "messaging/registration-token-not-registered"
+    ) {
+      console.warn(`[FCM Server] Token expired or invalid. Pruning: ${message.token?.substring(0, 10)}...`);
+      if (message.token) await removeFcmToken(message.token);
+    } else if (
+      errorMsg.includes("Permission") ||
+      errorMsg.includes("permission-denied") ||
+      err?.code === "messaging/permission-denied" ||
+      err?.status === 403
+    ) {
+      console.log(`[FCM Server] Cloud Messaging API permission inactive on environment credential. Notifications handled via in-app toast & Web Push.`);
+      fcmAvailable = false;
+      fcmPermissionDenied = true;
+    } else {
+      console.error(`[FCM Server] [REAL FCM API ERROR] Failed to send FCM message to token ${message.token?.substring(0, 10)}...: ${errorMsg}`);
+    }
+    return { success: false, realFcmSent: false, error: errorMsg };
+  }
+}
+
+// Send push notification helper
+async function sendFCMNotification(targetUser: string | null, title: string, body: string, payload: any = {}) {
+  console.log(`[FCM Server] Requesting push notification for ${targetUser || "ALL USERS"}: "${title} - ${body}"`);
+  
+  const tokens = await getFcmTokens(targetUser);
+  if (tokens.length === 0) {
+    console.log("[FCM Server] No registered device tokens found for target.");
+    return { success: false, realFcmCount: 0, reason: "NO_TOKENS" };
+  }
+
+  console.log(`[FCM Server] Found ${tokens.length} registered device token(s). Processing dispatch...`);
+
+  let realSentCount = 0;
+  if (fcmAvailable) {
+    for (const token of tokens) {
+      const message = {
+        token: token,
+        notification: {
+          title: title,
+          body: body
+        },
+        data: {
+          click_action: "/",
+          ...payload
+        },
+        webpush: {
+          headers: {
+            Urgency: "high",
+            TTL: "86400"
+          },
+          notification: {
+            title: title,
+            body: body,
+            icon: "/icon.svg",
+            badge: "/icon.svg",
+            tag: payload.notificationId || payload.id || "beerreal-notif"
+          },
+          fcm_options: {
+            link: "/"
+          }
+        },
+        apns: {
+          headers: {
+            "apns-priority": "10",
+            "apns-push-type": "alert"
+          },
+          payload: {
+            aps: {
+              alert: {
+                title: title,
+                body: body
+              },
+              sound: "default"
+            }
+          }
+        }
+      };
+      const res = await trySendFcmMessage(message);
+      if (res.realFcmSent) realSentCount++;
+      if (!fcmAvailable) break;
+    }
+    console.log(`[FCM Server] Completed FCM dispatch. Real API messages delivered: ${realSentCount}/${tokens.length}`);
+    return { success: realSentCount > 0, realFcmCount: realSentCount };
+  } else {
+    console.log(`[FCM Server] [SIMULATION MODE] FCM API disabled/unauthenticated. Simulated push for ${tokens.length} token(s):`, tokens.map(t => `${t.substring(0, 10)}...`));
+    return { success: false, realFcmCount: 0, reason: "SIMULATION_MODE" };
+  }
+}
+
+// Handle trigger push for a notification (with deduplication)
+async function sendFcmPushForNotification(notif: AppNotification) {
+  if (!notif || !notif.id) return;
+  if (pushedNotifIds.has(notif.id)) {
+    console.log(`[FCM Server] Notification ${notif.id} was already dispatched. Skipping duplicate push.`);
+    return;
+  }
+  pushedNotifIds.add(notif.id);
+  if (pushedNotifIds.size > 1000) {
+    const oldestKey = pushedNotifIds.values().next().value;
+    if (oldestKey) pushedNotifIds.delete(oldestKey);
+  }
+
+  let targetUser: string | null = null;
+  if (notif.targetUser) {
+    targetUser = notif.targetUser;
+  }
+
+  // Never deliver targeted notification back to the sender
+  if (targetUser && notif.user && targetUser.toLowerCase().trim() === notif.user.toLowerCase().trim()) {
+    console.log(`[FCM Server] Notification ${notif.id} target is sender. Skipping dispatch.`);
+    return;
+  }
+
+  const title = `BeerReal Alert! 🍻`;
+  const cleanText = notif.text.replace(/<[^>]*>/g, "");
+  const notifUser = notif.user ? notif.user.trim() : "";
+  const body = notifUser && !cleanText.toLowerCase().startsWith(notifUser.toLowerCase())
+    ? `${notifUser} ${cleanText}`
+    : cleanText;
+
+  if (targetUser) {
+    await sendFCMNotification(targetUser, title, body, { notificationId: notif.id, type: notif.type });
+  } else {
+    // Global notification (e.g. a friend logged a pint or went on a bender)
+    const tokens = await getFcmTokens(null);
+    const senderTokens = notif.user ? await getFcmTokens(notif.user) : [];
+    const senderTokenSet = new Set(senderTokens);
+
+    // Only deliver global notification to OTHER registered devices (never to the sender itself)
+    const recipientTokens = tokens.filter(t => !senderTokenSet.has(t));
+
+    if (recipientTokens.length > 0) {
+      console.log(`[FCM Server] Sending global notification to ${recipientTokens.length} device(s) for user ${notif.user}.`);
+      if (fcmAvailable) {
+        let realSentCount = 0;
+        for (const token of recipientTokens) {
+          const message = {
+            token: token,
+            notification: { title, body },
+            data: { click_action: "/", notificationId: notif.id, type: notif.type },
+            webpush: {
+              headers: {
+                Urgency: "high",
+                TTL: "86400"
+              },
+              notification: {
+                title,
+                body,
+                icon: "/icon.svg",
+                badge: "/icon.svg",
+                tag: notif.id
+              },
+              fcm_options: {
+                link: "/"
+              }
+            },
+            apns: {
+              headers: {
+                "apns-priority": "10",
+                "apns-push-type": "alert"
+              },
+              payload: {
+                aps: {
+                  alert: {
+                    title: title,
+                    body: body
+                  },
+                  sound: "default"
+                }
+              }
+            }
+          };
+          const res = await trySendFcmMessage(message);
+          if (res.realFcmSent) realSentCount++;
+          if (!fcmAvailable) break;
+        }
+        console.log(`[FCM Server] Global notification FCM dispatch complete. Real API messages delivered: ${realSentCount}/${recipientTokens.length}`);
+      } else {
+        console.log(`[FCM Server] [SIMULATION MODE] FCM API disabled/unauthenticated. Skipped real push API for ${recipientTokens.length} devices.`);
+      }
+    } else {
+      console.log("[FCM Server] No other registered device tokens available for global notification dispatch.");
+    }
+  }
+}
+
+// Helper to recursively strip out undefined values before saving to Firestore (since setDoc throws on undefined fields)
+function sanitizeForFirestore<T extends Record<string, any>>(obj: T): Record<string, any> {
+  if (!obj || typeof obj !== "object") return obj;
+  if (Array.isArray(obj)) {
+    return obj.map((item) => (typeof item === "object" && item !== null ? sanitizeForFirestore(item) : item));
+  }
+  const clean: Record<string, any> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (value !== undefined) {
+      if (value !== null && typeof value === "object" && !(value instanceof Date)) {
+        clean[key] = sanitizeForFirestore(value);
+      } else {
+        clean[key] = value;
+      }
+    }
+  }
+  return clean;
+}
+
+// Seed default data to Firestore if empty
+async function seedFirestoreIfEmpty() {
+  const firestore = getFirestoreInstance();
+  if (!firestore || !useFirestore) return;
+
+  try {
+    const usersColl = collection(firestore, "users");
+    const usersSnap = await getDocs(query(usersColl, limit(1)));
+    if (usersSnap.empty) {
+      console.log("[Firestore] Seeding initial users...");
+      for (const u of DEFAULT_USERS) {
+        await setDoc(doc(firestore, "users", u.username.toLowerCase()), sanitizeForFirestore(u));
+      }
+    }
+
+    const beersColl = collection(firestore, "beers");
+    const beersSnap = await getDocs(query(beersColl, limit(1)));
+    if (beersSnap.empty) {
+      console.log("[Firestore] Seeding initial beers...");
+      for (const b of DEFAULT_BEERS) {
+        await setDoc(doc(firestore, "beers", b.id), sanitizeForFirestore(b));
+      }
+    }
+  } catch (err) {
+    handleFirestoreError(err, "seeding Firestore");
+  }
+}
+
+// Helper to get all users
+async function getAllUsers(): Promise<UserProfile[]> {
+  const firestore = getFirestoreInstance();
+  let list: UserProfile[] = [];
+  if (firestore && useFirestore) {
+    try {
+      const snap = await getDocs(collection(firestore, "users"));
+      snap.forEach((docSnap) => {
+        list.push(docSnap.data() as UserProfile);
+      });
+    } catch (err) {
+      handleFirestoreError(err, "get users");
+    }
+  }
+
+  if (list.length === 0) {
+    list = DEFAULT_USERS;
+  }
+
+  // Auto-set password to 'Pints!' for any user missing it
+  let updatedUsersCount = 0;
+  const migratedUsers = list.map((u) => {
+    if (!u.password) {
+      updatedUsersCount++;
+      return { ...u, password: "Pints!" };
+    }
+    return u;
+  });
+
+  if (updatedUsersCount > 0 && firestore && useFirestore) {
+    try {
+      const batch = writeBatch(firestore);
+      for (const u of migratedUsers) {
+        batch.set(doc(firestore, "users", u.username.toLowerCase()), sanitizeForFirestore(u));
+      }
+      await batch.commit();
+      console.log(`[Migration] Firestore updated with default user passwords.`);
+    } catch (err) {
+      console.error("[Migration] Failed to batch-update Firestore with default user passwords:", err);
+    }
+  }
+
+  return migratedUsers;
+}
+
+// Helper to save/update user
+async function saveUser(profile: UserProfile): Promise<UserProfile> {
+  const usernameKey = profile.username.toLowerCase();
+  const firestore = getFirestoreInstance();
+  if (firestore && useFirestore) {
+    try {
+      await setDoc(doc(firestore, "users", usernameKey), sanitizeForFirestore(profile));
+    } catch (err) {
+      handleFirestoreError(err, "save user");
+    }
+  }
+  return profile;
+}
+
+function getLocalDateString(dateInput: Date | string | number, timeZone: string): string {
+  const d = new Date(dateInput);
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    });
+    const parts = formatter.formatToParts(d);
+    const year = parts.find(p => p.type === 'year')?.value;
+    const month = parts.find(p => p.type === 'month')?.value;
+    const day = parts.find(p => p.type === 'day')?.value;
+    if (year && month && day) {
+      return `${year}-${month}-${day}`;
+    }
+  } catch (e) {
+    console.error("Error formatting date for timezone:", timeZone, e);
+  }
+  const localDate = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
+  return localDate.toISOString().split('T')[0];
+}
+
+function getDayDifference(dateStr1: string, dateStr2: string): number {
+  const d1 = new Date(dateStr1 + "T12:00:00");
+  const d2 = new Date(dateStr2 + "T12:00:00");
+  const diffTime = d2.getTime() - d1.getTime();
+  return Math.round(diffTime / (1000 * 60 * 60 * 24));
+}
+
+// Recalculate and cache stats for a user
+async function recalculateAndCacheUserStats(username: string): Promise<any> {
+  const allBeersList = await getAllBeers();
+  const userLogs = allBeersList.filter(
+    (l) => l.user.toLowerCase() === username.toLowerCase()
+  );
+
+  const totalPints = userLogs.length;
+
+  const ratedLogs = userLogs.filter((l) => l.rating > 0);
+  const avgRating = ratedLogs.length > 0
+    ? (ratedLogs.reduce((acc, l) => acc + l.rating, 0) / ratedLogs.length).toFixed(1)
+    : "0.0";
+
+  const styleCounts: Record<string, number> = {};
+  userLogs.forEach((l) => {
+    const s = l.beerStyle || "Unknown";
+    styleCounts[s] = (styleCounts[s] || 0) + 1;
+  });
+  let favoriteStyle = "None yet";
+  let maxCount = 0;
+  Object.entries(styleCounts).forEach(([style, count]) => {
+    if (count > maxCount) {
+      favoriteStyle = style;
+      maxCount = count;
+    }
+  });
+
+  const totalCheers = userLogs.reduce((acc, l) => acc + (l.cheers?.length || 0), 0);
+
+  const allUsersList = await getAllUsers();
+  const existingUser = allUsersList.find(
+    (u) => u.username.toLowerCase() === username.toLowerCase()
+  );
+  const timeZone = (existingUser && (existingUser as any).timezone) || "America/Los_Angeles";
+
+  const benderDays: Record<string, number> = {};
+  userLogs.forEach((l) => {
+    const day = getLocalDateString(l.date, timeZone);
+    benderDays[day] = (benderDays[day] || 0) + 1;
+  });
+  const benderCount = Object.values(benderDays).filter((count) => count >= 4).length;
+
+  // Streak calculations
+  const loggedLocalDates = userLogs.map((l) => getLocalDateString(l.date, timeZone));
+  const uniqueDates = Array.from(new Set(loggedLocalDates)).sort();
+
+  let longestDrinkingStreak = 0;
+  let longestDryStreak = 0;
+  let currentDrinkingStreak = 0;
+  let currentDryStreak = 0;
+
+  if (uniqueDates.length > 0) {
+    // 1. Longest Drinking Streak
+    let tempDrinkingStreak = 1;
+    for (let i = 1; i < uniqueDates.length; i++) {
+      const diff = getDayDifference(uniqueDates[i - 1], uniqueDates[i]);
+      if (diff === 1) {
+        tempDrinkingStreak++;
+      } else if (diff > 1) {
+        if (tempDrinkingStreak > longestDrinkingStreak) {
+          longestDrinkingStreak = tempDrinkingStreak;
+        }
+        tempDrinkingStreak = 1;
+      }
+    }
+    if (tempDrinkingStreak > longestDrinkingStreak) {
+      longestDrinkingStreak = tempDrinkingStreak;
+    }
+
+    // 2. Today Status
+    const todayStr = getLocalDateString(new Date(), timeZone);
+    const hasLogToday = uniqueDates.includes(todayStr);
+
+    // 3. Current Drinking / Dry Streak (Mutually Exclusive)
+    if (hasLogToday) {
+      currentDryStreak = 0;
+      let checkDate = new Date(todayStr + "T12:00:00");
+      while (true) {
+        const checkDateStr = getLocalDateString(checkDate, timeZone);
+        if (uniqueDates.includes(checkDateStr)) {
+          currentDrinkingStreak++;
+          checkDate.setDate(checkDate.getDate() - 1);
+        } else {
+          break;
+        }
+      }
+    } else {
+      currentDrinkingStreak = 0;
+      let checkDate = new Date(todayStr + "T12:00:00");
+      while (true) {
+        const checkDateStr = getLocalDateString(checkDate, timeZone);
+        if (!uniqueDates.includes(checkDateStr)) {
+          currentDryStreak++;
+          checkDate.setDate(checkDate.getDate() - 1);
+        } else {
+          break;
+        }
+      }
+    }
+
+    // 4. Longest Dry Streak
+    if (uniqueDates.length > 1) {
+      for (let i = 1; i < uniqueDates.length; i++) {
+        const diff = getDayDifference(uniqueDates[i - 1], uniqueDates[i]);
+        const dryDays = diff - 1;
+        if (dryDays > longestDryStreak) {
+          longestDryStreak = dryDays;
+        }
+      }
+    }
+    if (currentDryStreak > longestDryStreak) {
+      longestDryStreak = currentDryStreak;
+    }
+  }
+
+  const calculatedStats = {
+    totalPints,
+    avgRating,
+    favoriteStyle,
+    totalCheers,
+    benderCount,
+    longestDrinkingStreak,
+    longestDryStreak,
+    currentDrinkingStreak,
+    currentDryStreak
+  };
+
+  if (existingUser) {
+    const updatedProfile = {
+      ...existingUser,
+      stats: calculatedStats
+    };
+    await saveUser(updatedProfile);
+  }
+
+  return calculatedStats;
+}
+
+// Helper to delete user
+async function deleteUser(username: string): Promise<boolean> {
+  const usernameKey = username.toLowerCase();
+  const firestore = getFirestoreInstance();
+  if (firestore && useFirestore) {
+    try {
+      // Delete user
+      await deleteDoc(doc(firestore, "users", usernameKey));
+
+      // Delete user's beers from Firestore
+      const beersColl = collection(firestore, "beers");
+      const q = query(beersColl, where("user", "==", username));
+      const snap = await getDocs(q);
+      const batch = writeBatch(firestore);
+      snap.forEach((docSnap) => {
+        batch.delete(docSnap.ref);
+      });
+      await batch.commit();
+      return true;
+    } catch (err) {
+      handleFirestoreError(err, "delete user");
+      return false;
+    }
+  }
+  return false;
+}
+
+// Helper to get all beers
+async function getAllBeers(): Promise<BeerLog[]> {
+  const firestore = getFirestoreInstance();
+  let list: BeerLog[] = [];
+  
+  if (firestore && useFirestore) {
+    try {
+      const beersColl = collection(firestore, "beers");
+      const q = query(beersColl, orderBy("date", "desc"), limit(200));
+      const snap = await getDocs(q);
+      snap.forEach((docSnap) => {
+        list.push(docSnap.data() as BeerLog);
+      });
+    } catch (err) {
+      handleFirestoreError(err, "get beers");
+    }
+  }
+
+  if (list.length === 0) {
+    list = DEFAULT_BEERS;
+  }
+
+  // Sort beers in descending date order
+  list.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+  // Auto-correct & normalize beer names
+  let updatedCount = 0;
+  const cleanedList = list.map((b) => {
+    if (!b.beerName) return b;
+    const normalized = normalizeBeerName(b.beerName);
+    const newName = normalized.name || b.beerName;
+
+    if (newName !== b.beerName) {
+      updatedCount++;
+      const updatedLog = { ...b, beerName: newName };
+      if (normalized.style && (!b.beerStyle || b.beerStyle === "Other")) {
+        updatedLog.beerStyle = normalized.style;
+      }
+      if (normalized.abv && (!b.abv || b.abv === 5.0)) {
+        updatedLog.abv = normalized.abv;
+      }
+      return updatedLog;
+    }
+    return b;
+  });
+
+  if (updatedCount > 0 && firestore && useFirestore) {
+    try {
+      const batch = writeBatch(firestore);
+      for (const log of cleanedList) {
+        batch.set(doc(firestore, "beers", log.id), sanitizeForFirestore(log));
+      }
+      await batch.commit();
+      console.log(`[Migration] Firestore updated with normalized beer log names.`);
+    } catch (err) {
+      console.error("[Migration] Failed to batch-update Firestore with corrected names:", err);
+    }
+  }
+
+  return cleanedList;
+}
+
+// Helper to save beer log
+async function saveBeerLog(log: BeerLog): Promise<BeerLog> {
+  const firestore = getFirestoreInstance();
+  if (firestore && useFirestore) {
+    try {
+      await setDoc(doc(firestore, "beers", log.id), sanitizeForFirestore(log));
+    } catch (err) {
+      handleFirestoreError(err, "save beer log");
+    }
+  }
+  return log;
+}
+
+// Helper to save notification
+function isUserCustomBeerName(name: string | undefined | null): boolean {
+  if (!name) return false;
+  const trimmed = name.trim();
+  const lower = trimmed.toLowerCase();
+  if (trimmed.length === 0) return false;
+  if (lower === "unnamed pint" || lower === "unnamed pint 🍺" || lower === "unnamed" || lower === "beer") return false;
+  return true;
+}
+
+function isGuinnessBeerName(name: string | undefined | null): boolean {
+  if (!name) return false;
+  return name.trim().toLowerCase().includes("guinness");
+}
+
+function generateCreativeBeerNotificationText(beerName: string, abv: number, dateStr: string, hadCig: boolean, todayCount: number): string {
+  const hasCustomName = isUserCustomBeerName(beerName);
+  const isGuinness = isGuinnessBeerName(beerName);
+  const cleanBeerName = hasCustomName ? `<strong>${beerName.trim()}</strong>` : "";
+  const cigSfx = hadCig ? " 🚬" : "";
+
+  // Get hour from ISO date string
+  let hour = 17; // default
+  try {
+    const dt = new Date(dateStr);
+    hour = dt.getHours();
+  } catch (e) {
+    // fallback
+  }
+
+  // SPECIAL GUINNESS NOTIFICATION
+  if (isGuinness) {
+    const guinnessOptions = [
+      `is pouring a majestic black pint of ${cleanBeerName || "Guinness"}! 🖤🇮🇪🍺 Sláinte!${cigSfx}`,
+      `is settling a smooth, creamy pint of ${cleanBeerName || "Guinness"}! 🇮🇪🍺 Good things come to those who wait!${cigSfx}`,
+      `just poured the dark stuff: a lovely pint of ${cleanBeerName || "Guinness"}! 🖤🍻 Sláinte!${cigSfx}`,
+      `is enjoying a perfectly settled velvet pint of ${cleanBeerName || "Guinness"}! 🖤🍺 Sláinte!${cigSfx}`
+    ];
+    return guinnessOptions[Math.floor(Math.random() * guinnessOptions.length)];
+  }
+
+  // 1st of the day!
+  if (todayCount === 1) {
+    if (hasCustomName) {
+      const options = [
+        `is kickstarting their day with their <strong>1st pint</strong>: a crisp ${cleanBeerName}! 🌅🍺${cigSfx}`,
+        `is opening the floodgates! <strong>First pint of the day</strong> is a cold ${cleanBeerName}! 🔓🍻${cigSfx}`,
+        `is wetting their whistle with the debut pint of the day: ${cleanBeerName}! 🎨🍺${cigSfx}`,
+        `is officially in play! <strong>1st pint</strong> of the day: ${cleanBeerName}! 🚩🍻${cigSfx}`
+      ];
+      return options[Math.floor(Math.random() * options.length)];
+    } else {
+      const options = [
+        `is kickstarting their day with a cold <strong>1st pint</strong>! 🌅🍺${cigSfx}`,
+        `is opening the floodgates with their <strong>first pint of the day</strong>! 🔓🍻${cigSfx}`,
+        `is wetting their whistle with the debut pint of the day! 🎨🍺${cigSfx}`,
+        `is officially in play with their <strong>1st pint</strong>! 🚩🍻${cigSfx}`
+      ];
+      return options[Math.floor(Math.random() * options.length)];
+    }
+  }
+
+  // Early morning (before 11 AM)
+  if (hour < 11) {
+    if (hasCustomName) {
+      const options = [
+        `is starting shockingly early! An early-morning pint of ${cleanBeerName}! 🌅👀${cigSfx}`,
+        `believes it's five o'clock somewhere! Breakfast beer: ${cleanBeerName}! 🍳🍺${cigSfx}`,
+        `is beating the sun with an early doors ${cleanBeerName}! 🐓🍻${cigSfx}`
+      ];
+      return options[Math.floor(Math.random() * options.length)];
+    } else {
+      const options = [
+        `is starting shockingly early with a morning pint! 🌅👀${cigSfx}`,
+        `believes it's five o'clock somewhere! Breakfast pint! 🍳🍺${cigSfx}`,
+        `is beating the sun with an early doors pint! 🐓🍻${cigSfx}`
+      ];
+      return options[Math.floor(Math.random() * options.length)];
+    }
+  }
+
+  // High ABV (>= 8%)
+  if (abv >= 8) {
+    if (hasCustomName) {
+      const options = [
+        `is playing with fire! Sinking a heavy ${cleanBeerName} (${abv}% ABV)! 🔥🥴${cigSfx}`,
+        `is tackling an absolute unit of a beer: ${cleanBeerName} at ${abv}%! 🥊🍺${cigSfx}`,
+        `is cruising in the fast lane with a strong ${cleanBeerName} (${abv}%)! 🚀🍻${cigSfx}`
+      ];
+      return options[Math.floor(Math.random() * options.length)];
+    } else {
+      const options = [
+        `is playing with fire! Sinking a heavy pint (${abv}% ABV)! 🔥🥴${cigSfx}`,
+        `is tackling an absolute unit of a pint at ${abv}% ABV! 🥊🍺${cigSfx}`,
+        `is cruising in the fast lane with a strong pint (${abv}%)! 🚀🍻${cigSfx}`
+      ];
+      return options[Math.floor(Math.random() * options.length)];
+    }
+  }
+
+  // Low ABV (<= 0.5% and > 0)
+  if (abv <= 0.5 && abv > 0) {
+    if (hasCustomName) {
+      const options = [
+        `is staying responsible with a sober-safe ${cleanBeerName} (${abv}% ABV)! 😇🌱${cigSfx}`,
+        `is pacing themselves with a clear-headed ${cleanBeerName} (${abv}%)! 🧠🍻${cigSfx}`
+      ];
+      return options[Math.floor(Math.random() * options.length)];
+    } else {
+      const options = [
+        `is staying responsible with a sober-safe pint (${abv}% ABV)! 😇🌱${cigSfx}`,
+        `is pacing themselves with a clear-headed pint (${abv}%)! 🧠🍻${cigSfx}`
+      ];
+      return options[Math.floor(Math.random() * options.length)];
+    }
+  }
+
+  // Lunch pint (between 12 PM and 2 PM, i.e. 12 and 13)
+  if (hour >= 12 && hour < 14) {
+    if (hasCustomName) {
+      const options = [
+        `is enjoying a sneaky lunch pint of ${cleanBeerName}! Shhh... 🤫🍔🍺${cigSfx}`,
+        `is taking a very productive 'working lunch' with a ${cleanBeerName}! 💼🍻${cigSfx}`,
+        `is supplementing their diet with a liquid lunch: ${cleanBeerName}! 🥗🍺${cigSfx}`
+      ];
+      return options[Math.floor(Math.random() * options.length)];
+    } else {
+      const options = [
+        `is enjoying a sneaky lunch pint! Shhh... 🤫🍔🍺${cigSfx}`,
+        `is taking a very productive 'working lunch' with a cold pint! 💼🍻${cigSfx}`,
+        `is supplementing their diet with a liquid lunch! 🥗🍺${cigSfx}`
+      ];
+      return options[Math.floor(Math.random() * options.length)];
+    }
+  }
+
+  // Late Night (after 11 PM or before 4 AM)
+  if (hour >= 23 || hour < 4) {
+    if (hasCustomName) {
+      const options = [
+        `is howling at the moon with a late-night ${cleanBeerName}! 🌕🐺${cigSfx}`,
+        `is refusing to let the night end! Sinking a midnight ${cleanBeerName}! 🦉🍻${cigSfx}`,
+        `is burning the midnight oil with a dark-hours ${cleanBeerName}! 🕯️🍺${cigSfx}`
+      ];
+      return options[Math.floor(Math.random() * options.length)];
+    } else {
+      const options = [
+        `is howling at the moon with a late-night pint! 🌕🐺${cigSfx}`,
+        `is refusing to let the night end! Sinking a midnight pint! 🦉🍻${cigSfx}`,
+        `is burning the midnight oil with a dark-hours pint! 🕯️🍺${cigSfx}`
+      ];
+      return options[Math.floor(Math.random() * options.length)];
+    }
+  }
+
+  // Standard but creative notifications for general logs
+  if (hasCustomName) {
+    const generalOptions = [
+      `is sinking a crisp pint of ${cleanBeerName}! 🍺${cigSfx}`,
+      `is wetting their whistle with a lovely ${cleanBeerName}! 🍻${cigSfx}`,
+      `just poured a glorious, frothy ${cleanBeerName}! ✨🍺${cigSfx}`,
+      `is absolutely demolishing a cold ${cleanBeerName}! 🦖🍻${cigSfx}`,
+      `is taking a big pull of ${cleanBeerName}! Down the hatch! 🌊🍺${cigSfx}`,
+      `is treating themselves to a well-earned ${cleanBeerName}! 🎯🍻${cigSfx}`,
+      `is enjoying the nectar of the gods: ${cleanBeerName}! 🍯🍺${cigSfx}`,
+      `is keeping the good times rolling with a ${cleanBeerName}! 🔄🍻${cigSfx}`,
+      `is having some quality pub chat over a cold ${cleanBeerName}! 🗣️🍺${cigSfx}`,
+      `is sinking a majestic pint of ${cleanBeerName}! 🏰🍺${cigSfx}`
+    ];
+    return generalOptions[Math.floor(Math.random() * generalOptions.length)];
+  } else {
+    const generalOptions = [
+      `is sinking a crisp pint! 🍺${cigSfx}`,
+      `is wetting their whistle with a lovely pint! 🍻${cigSfx}`,
+      `just poured a cold one! Down the hatch! ✨🍺${cigSfx}`,
+      `is absolutely demolishing a cold pint! 🦖🍻${cigSfx}`,
+      `is taking a big pull! Down the hatch! 🌊🍺${cigSfx}`,
+      `is treating themselves to a well-earned pint! 🎯🍻${cigSfx}`,
+      `is enjoying the nectar of the gods! 🍯🍺${cigSfx}`,
+      `is keeping the good times rolling with a cold pint! 🔄🍻${cigSfx}`,
+      `is having some quality pub chat over a cold pint! 🗣️🍺${cigSfx}`,
+      `is sinking a majestic pint! 🏰🍺${cigSfx}`
+    ];
+    return generalOptions[Math.floor(Math.random() * generalOptions.length)];
+  }
+}
+
+async function saveNotification(notif: AppNotification): Promise<AppNotification> {
+  const firestore = getFirestoreInstance();
+  if (firestore && useFirestore) {
+    try {
+      await setDoc(doc(firestore, "notifications", notif.id), sanitizeForFirestore(notif));
+    } catch (err) {
+      handleFirestoreError(err, "save notification");
+    }
+  }
+
+  // Always dispatch FCM push notification asynchronously in background
+  sendFcmPushForNotification(notif).catch((pushErr) => {
+    console.error("[FCM Server] Error sending push notification:", pushErr);
+  });
+
+  return notif;
+}
+
+interface CreateNotificationOptions {
+  user: string;
+  text: string;
+  targetUser?: string;
+  type?: "post" | "comment" | "cheer" | "reaction" | "bender" | "invite" | "tag" | "imposter";
+  date?: string;
+  idPrefix?: string;
+}
+
+async function createAndDispatchNotification(options: CreateNotificationOptions): Promise<AppNotification | null> {
+  try {
+    const prefix = options.idPrefix || "notif";
+    const notifId = `${prefix}-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+
+    const notif: AppNotification = {
+      id: notifId,
+      user: options.user,
+      text: options.text,
+      date: options.date || new Date().toISOString(),
+      readBy: [],
+      ...(options.targetUser ? { targetUser: options.targetUser } : {}),
+      ...(options.type ? { type: options.type } : {}),
+    };
+
+    return await saveNotification(notif);
+  } catch (err) {
+    console.error("Failed to create and dispatch notification:", err);
+    return null;
+  }
+}
+
+// Helper to get all pubs
+async function getAllPubs(): Promise<Pub[]> {
+  const firestore = getFirestoreInstance();
+  let list: Pub[] = [];
+  if (firestore && useFirestore) {
+    try {
+      const snap = await getDocs(collection(firestore, "pubs"));
+      snap.forEach((docSnap) => {
+        list.push(docSnap.data() as Pub);
+      });
+    } catch (err) {
+      handleFirestoreError(err, "get pubs");
+    }
+  }
+  return list;
+}
+
+// Helper to save/update pub
+async function savePub(pub: Pub): Promise<Pub> {
+  const firestore = getFirestoreInstance();
+  if (firestore && useFirestore) {
+    try {
+      await setDoc(doc(firestore, "pubs", pub.id), sanitizeForFirestore(pub));
+    } catch (err) {
+      handleFirestoreError(err, "save pub");
+    }
+  }
+  return pub;
+}
+
+// Helper to delete a pub
+async function deletePub(pubId: string): Promise<boolean> {
+  const firestore = getFirestoreInstance();
+  if (firestore && useFirestore) {
+    try {
+      await deleteDoc(doc(firestore, "pubs", pubId));
+      return true;
+    } catch (err) {
+      handleFirestoreError(err, "delete pub");
+      return false;
+    }
+  }
+  return false;
+}
+
+// Helper to get pub chat messages
+async function getPubMessages(pubId: string): Promise<PubChatMessage[]> {
+  const firestore = getFirestoreInstance();
+  const list: PubChatMessage[] = [];
+  if (firestore && useFirestore) {
+    try {
+      const snap = await getDocs(collection(firestore, "pub_messages"));
+      snap.forEach((docSnap) => {
+        const msg = docSnap.data() as PubChatMessage;
+        if (msg.pubId === pubId) {
+          list.push(msg);
+        }
+      });
+    } catch (err) {
+      console.error("Firestore error reading pub_messages:", err);
+    }
+  }
+  return list.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+}
+
+// Helper to save pub chat message
+async function savePubChatMessage(msg: PubChatMessage): Promise<PubChatMessage> {
+  const firestore = getFirestoreInstance();
+  if (firestore && useFirestore) {
+    try {
+      await setDoc(doc(firestore, "pub_messages", msg.id), sanitizeForFirestore(msg));
+    } catch (err) {
+      console.error("Firestore error saving pub_message:", err);
+    }
+  }
+  return msg;
+}
+
+// Helper to get notifications
+async function getAllNotifications(): Promise<AppNotification[]> {
+  const firestore = getFirestoreInstance();
+  let list: AppNotification[] = [];
+  if (firestore && useFirestore) {
+    try {
+      const coll = collection(firestore, "notifications");
+      const q = query(coll, orderBy("date", "desc"), limit(100));
+      const snap = await getDocs(q);
+      snap.forEach((docSnap) => {
+        list.push(docSnap.data() as AppNotification);
+      });
+    } catch (err) {
+      handleFirestoreError(err, "get notifications");
+    }
+  }
+  return list;
+}
+
+// Helper to mark notifications as read for a specific user
+async function markNotificationsRead(username: string): Promise<boolean> {
+  const userLower = username.toLowerCase().trim();
+  const firestore = getFirestoreInstance();
+  if (firestore && useFirestore) {
+    try {
+      const allNotifs = await getAllNotifications();
+      const batch = writeBatch(firestore);
+      let count = 0;
+      for (const n of allNotifs) {
+        const readSet = new Set((n.readBy || []).map(r => r.toLowerCase().trim()));
+        if (!readSet.has(userLower)) {
+          const newReadBy = [...(n.readBy || []), userLower];
+          batch.update(doc(firestore, "notifications", n.id), {
+            readBy: newReadBy
+          });
+          count++;
+        }
+      }
+      if (count > 0) {
+        await batch.commit();
+        console.log(`[Firestore] Marked ${count} notifications as read for ${username}.`);
+      }
+    } catch (err) {
+      handleFirestoreError(err, "batch-update notifications readBy");
+    }
+  }
+  return true;
+}
+
+// Helper to find a beer log by ID
+async function findBeerLogById(id: string): Promise<BeerLog | null> {
+  if (!id) return null;
+  const firestore = getFirestoreInstance();
+  if (firestore && useFirestore) {
+    try {
+      const docSnap = await getDoc(doc(firestore, "beers", id));
+      if (docSnap.exists()) {
+        return docSnap.data() as BeerLog;
+      }
+    } catch (err) {
+      handleFirestoreError(err, "findBeerLogById");
+    }
+  }
+  return null;
+}
+
+// Per-log mutex lock to prevent concurrent HTTP request race conditions
+const logLocks = new Map<string, Promise<any>>();
+
+function withLogLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
+  const currentLock = logLocks.get(id) || Promise.resolve();
+  const nextLock = currentLock.then(fn, fn);
+  logLocks.set(id, nextLock);
+  return nextLock;
+}
+
+// Helper to update/toggle cheers on a beer log
+async function toggleBeerCheers(id: string, username: string): Promise<BeerLog | null> {
+  return toggleBeerReaction(id, username, "cheers");
+}
+
+// Helper to update/toggle any reaction on a beer log
+async function toggleBeerReaction(id: string, username: string, reactionType: string): Promise<BeerLog | null> {
+  return withLogLock(id, async () => {
+    const firestore = getFirestoreInstance();
+    let updatedLog: BeerLog | null = null;
+
+    if (firestore && useFirestore) {
+      try {
+        updatedLog = await runTransaction(firestore, async (transaction) => {
+          const beerRef = doc(firestore, "beers", id);
+          const snap = await transaction.get(beerRef);
+          if (!snap.exists()) {
+            return null;
+          }
+          const log = snap.data() as BeerLog;
+
+          if (!log.cheers || !Array.isArray(log.cheers)) {
+            log.cheers = [];
+          }
+          if (!log.reactions || typeof log.reactions !== "object" || Array.isArray(log.reactions)) {
+            log.reactions = {};
+          }
+
+          if (reactionType === "cheers") {
+            const cheerIndex = log.cheers.indexOf(username);
+            if (cheerIndex === -1) {
+              log.cheers.push(username);
+            } else {
+              log.cheers.splice(cheerIndex, 1);
+            }
+          }
+
+          if (!log.reactions[reactionType] || !Array.isArray(log.reactions[reactionType])) {
+            log.reactions[reactionType] = [];
+          }
+
+          const userIndex = log.reactions[reactionType].indexOf(username);
+          if (userIndex === -1) {
+            log.reactions[reactionType].push(username);
+          } else {
+            log.reactions[reactionType].splice(userIndex, 1);
+          }
+
+          if (reactionType === "cheers") {
+            log.reactions["cheers"] = [...log.cheers];
+          }
+
+          transaction.set(beerRef, log);
+          return log;
+        });
+      } catch (err) {
+        handleFirestoreError(err, "toggle reaction transaction");
+      }
+    }
+
+    return updatedLog;
+  });
+}
+
+// Helper to delete a beer log
+async function deleteBeerLog(id: string): Promise<boolean> {
+  const firestore = getFirestoreInstance();
+  if (firestore && useFirestore) {
+    try {
+      await deleteDoc(doc(firestore, "beers", id));
+      return true;
+    } catch (err) {
+      handleFirestoreError(err, "delete beer log");
+      return false;
+    }
+  }
+  return false;
+}
+
+// Helper to add a comment to a beer log
+async function addBeerComment(id: string, user: string, text: string): Promise<BeerLog | null> {
+  const log = await findBeerLogById(id);
+  if (!log) {
+    return null;
+  }
+
+  if (!log.comments) {
+    log.comments = [];
+  }
+
+  const newComment = {
+    id: `comment-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+    user,
+    text,
+    date: new Date().toISOString()
+  };
+
+  log.comments.push(newComment);
+
+  const firestore = getFirestoreInstance();
+  if (firestore && useFirestore) {
+    try {
+      await setDoc(doc(firestore, "beers", id), sanitizeForFirestore(log));
+    } catch (err) {
+      handleFirestoreError(err, "save comment");
+    }
+  }
+  return log;
+}
+
+// Helper to delete a comment from a beer log
+async function deleteBeerComment(id: string, commentId: string): Promise<BeerLog | null> {
+  const log = await findBeerLogById(id);
+  if (!log) {
+    return null;
+  }
+
+  if (!log.comments) {
+    return log;
+  }
+
+  log.comments = log.comments.filter((c) => c.id !== commentId);
+
+  const firestore = getFirestoreInstance();
+  if (firestore && useFirestore) {
+    try {
+      await setDoc(doc(firestore, "beers", id), sanitizeForFirestore(log));
+    } catch (err) {
+      handleFirestoreError(err, "delete comment");
+    }
+  }
+  return log;
+}
+
+function isSeymoreBeers(username: any): boolean {
+  if (!username || typeof username !== "string") return false;
+  const normalized = username.toLowerCase().trim().replace(/\s+/g, "");
+  return normalized === "seymorebeers" || normalized === "seymorebeerz" || normalized === "seymore";
+}
+
+function findTags(text: string): string[] {
+  if (!text) return [];
+  const matches = text.match(/@([a-zA-Z0-9_-]+)/g);
+  if (!matches) return [];
+  const usernames = matches.map(m => m.substring(1));
+  return Array.from(new Set(usernames));
+}
+
+async function getValidTags(text: string): Promise<string[]> {
+  const tags = findTags(text);
+  if (tags.length === 0) return [];
+  try {
+    const allUsers = await getAllUsers();
+    const existingUsernames = new Set(allUsers.map(u => u.username.toLowerCase().trim()));
+    return tags.filter(t => existingUsernames.has(t.toLowerCase().trim())).map(t => {
+      const match = allUsers.find(u => u.username.toLowerCase().trim() === t.toLowerCase().trim());
+      return match ? match.username : t;
+    });
+  } catch (err) {
+    console.error("Error checking valid tags:", err);
+    return tags;
+  }
+}
+
+// --- API ROUTES ---
+
+// GET Firestore Debug Info
+app.get("/api/firestore-debug", async (req, res) => {
+  const firestore = getFirestoreInstance();
+  const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+  const configExists = fs.existsSync(configPath);
+  let configContent: any = null;
+  if (configExists) {
+    try {
+      configContent = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    } catch (e: any) {
+      configContent = { error: e.message };
+    }
+  }
+
+  let testResult: any = null;
+  if (firestore) {
+    try {
+      const snap = await getDocs(query(collection(firestore, "users"), limit(1)));
+      testResult = { success: true, empty: snap.empty, size: snap.size };
+    } catch (e: any) {
+      testResult = {
+        success: false,
+        message: e.message,
+        code: e.code,
+        details: e.details,
+        stack: e.stack
+      };
+    }
+  } else {
+    testResult = { success: false, message: "Firestore instance is null" };
+  }
+
+  res.json({
+    useFirestore,
+    configExists,
+    configContent: configContent ? { projectId: configContent.projectId, databaseId: configContent.firestoreDatabaseId } : null,
+    testResult
+  });
+});
+
+// POST Firestore Reconnect / Retry
+app.post("/api/firestore-reconnect", async (req, res) => {
+  console.log("[Firestore] Reconnection requested by client.");
+  const firestore = getFirestoreInstance();
+  if (!firestore) {
+    res.status(500).json({ success: false, message: "Firestore instance could not be initialized." });
+    return;
+  }
+
+  // Set useFirestore back to true and test the connection
+  useFirestore = true;
+  try {
+    const snap = await getDocs(query(collection(firestore, "users"), limit(1)));
+    console.log("[Firestore] Reconnection successful! Found users:", snap.size);
+    // Call seed if empty just in case
+    await seedFirestoreIfEmpty();
+    res.json({ success: true, message: "Firestore connection restored successfully!", useFirestore: true });
+  } catch (e: any) {
+    const errMsg = e?.message || e?.toString() || "";
+    const isQuota = 
+      e?.code === "resource-exhausted" || 
+      e?.code === "quota-exceeded" ||
+      errMsg.toLowerCase().includes("quota") ||
+      errMsg.toLowerCase().includes("exhausted");
+    
+    if (isQuota) {
+      console.warn("[Firestore] Reconnection test failed due to quota limit:", errMsg);
+      useFirestore = false;
+      res.status(429).json({
+        success: false,
+        message: "Firestore connection failed. Project is still reporting quota exhaustion: " + errMsg,
+        useFirestore: false
+      });
+    } else {
+      console.error("[Firestore] Reconnection test failed:", e);
+      res.status(500).json({
+        success: false,
+        message: "Firestore connection failed: " + errMsg,
+        useFirestore: false
+      });
+    }
+  }
+});
+
+// Helper function to push local JSON files back up to Firestore
+async function pushLocalToFirestore(): Promise<{ usersCount: number; beersCount: number; pubsCount: number; notificationsCount: number }> {
+  const firestore = getFirestoreInstance();
+  if (!firestore) throw new Error("Firestore not initialized");
+
+  const usersSnap = await getDocs(collection(firestore, "users"));
+  const beersSnap = await getDocs(collection(firestore, "beers"));
+  const pubsSnap = await getDocs(collection(firestore, "pubs"));
+  const notifsSnap = await getDocs(collection(firestore, "notifications"));
+
+  if (usersSnap.empty) {
+    const batch = writeBatch(firestore);
+    for (const u of DEFAULT_USERS) {
+      batch.set(doc(firestore, "users", u.username.toLowerCase()), sanitizeForFirestore(u));
+    }
+    await batch.commit();
+  }
+
+  if (beersSnap.empty) {
+    const batch = writeBatch(firestore);
+    for (const b of DEFAULT_BEERS) {
+      batch.set(doc(firestore, "beers", b.id), sanitizeForFirestore(b));
+    }
+    await batch.commit();
+  }
+
+  return {
+    usersCount: usersSnap.size || DEFAULT_USERS.length,
+    beersCount: beersSnap.size || DEFAULT_BEERS.length,
+    pubsCount: pubsSnap.size,
+    notificationsCount: notifsSnap.size
+  };
+}
+
+// POST Sync Local Offline Data to Cloud Firestore
+app.post("/api/firestore-sync-local-to-cloud", async (req, res) => {
+  console.log("[Sync] Request to push local offline backup data to Firestore.");
+  const firestore = getFirestoreInstance();
+  if (!firestore) {
+    res.status(500).json({ success: false, message: "Firestore instance could not be initialized." });
+    return;
+  }
+
+  try {
+    useFirestore = true;
+    await getDocs(query(collection(firestore, "users"), limit(1)));
+    const counts = await pushLocalToFirestore();
+    
+    res.json({
+      success: true,
+      message: `Firestore is active as single source of truth. ${counts.usersCount} users, ${counts.beersCount} logs, ${counts.pubsCount} pubs, and ${counts.notificationsCount} notifications verified.`,
+      counts
+    });
+  } catch (e: any) {
+    console.error("[Sync] Push failed:", e);
+    const errMsg = e?.message || e?.toString() || "";
+    res.status(500).json({
+      success: false,
+      message: "Push failed. Make sure your Billing is active and Firestore permissions allow writing: " + errMsg
+    });
+  }
+});
+
+// Helper function to pull all active data from Firestore
+async function pullFirestoreToLocal(): Promise<{ usersCount: number; beersCount: number; pubsCount: number; notificationsCount: number }> {
+  const usersList = await getAllUsers();
+  const beersList = await getAllBeers();
+  const pubsList = await getAllPubs();
+  const notifsList = await getAllNotifications();
+
+  return {
+    usersCount: usersList.length,
+    beersCount: beersList.length,
+    pubsCount: pubsList.length,
+    notificationsCount: notifsList.length
+  };
+}
+
+// POST Pull Cloud Firestore Data to Local Offline Storage
+app.post("/api/firestore-pull-to-local", async (req, res) => {
+  console.log("[Sync] Request to pull Cloud Firestore data to local backup files.");
+  const firestore = getFirestoreInstance();
+  if (!firestore) {
+    res.status(500).json({ success: false, message: "Firestore instance could not be initialized." });
+    return;
+  }
+
+  try {
+    // Make sure useFirestore is set to true
+    useFirestore = true;
+    
+    // Test connection first
+    await getDocs(query(collection(firestore, "users"), limit(1)));
+    
+    // Pull and update local backup files
+    const counts = await pullFirestoreToLocal();
+    
+    res.json({
+      success: true,
+      message: `Cloud database data successfully retrieved and restored! Synced ${counts.usersCount} users, ${counts.beersCount} logs, ${counts.pubsCount} pubs, and ${counts.notificationsCount} notifications to the app.`,
+      counts
+    });
+  } catch (e: any) {
+    console.error("[Sync] Pull failed:", e);
+    const errMsg = e?.message || e?.toString() || "";
+    res.status(500).json({
+      success: false,
+      message: "Pull failed. Make sure your Billing is active and Firestore is accessible: " + errMsg
+    });
+  }
+});
+
+// GET Leaderboard Beers (scoped by date range)
+app.get("/api/leaderboard-beers", async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const list = await getAllBeers();
+
+    if (!startDate || !endDate) {
+      res.json(list || []);
+      return;
+    }
+
+    const start = new Date(startDate as string).getTime();
+    const end = new Date(endDate as string).getTime();
+
+    const filtered = (list || []).filter((log) => {
+      const logTime = new Date(log.date).getTime();
+      return logTime >= start && logTime <= end;
+    });
+
+    res.json(filtered);
+  } catch (err) {
+    console.error("Error fetching leaderboard beers:", err);
+    res.status(500).json({ error: "Failed to fetch leaderboard beers" });
+  }
+});
+
+// GET Beers
+app.get("/api/beers", async (req, res) => {
+  let list = await getAllBeers();
+  const userParam = req.query.user as string;
+  const pubParam = req.query.pubId as string;
+  const styleParam = req.query.beerStyle as string;
+  const searchParam = (req.query.search || req.query.q) as string;
+
+  if (userParam && userParam !== "all") {
+    list = list.filter((b) => b.user === userParam);
+  }
+  if (pubParam && pubParam !== "global" && pubParam !== "all") {
+    list = list.filter((b) => b.pubId === pubParam);
+  }
+  if (styleParam && styleParam !== "all") {
+    list = list.filter((b) => b.beerStyle === styleParam);
+  }
+  if (searchParam && searchParam.trim()) {
+    const term = searchParam.trim().toLowerCase();
+    list = list.filter((b) =>
+      (b.beerName && b.beerName.toLowerCase().includes(term)) ||
+      (b.beerStyle && b.beerStyle.toLowerCase().includes(term)) ||
+      (b.comment && b.comment.toLowerCase().includes(term)) ||
+      (b.user && b.user.toLowerCase().includes(term))
+    );
+  }
+
+  const limitVal = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
+  const offsetVal = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
+
+  if (limitVal !== undefined) {
+    const paginatedBeers = list.slice(offsetVal, offsetVal + limitVal);
+    res.json({
+      beers: paginatedBeers,
+      hasMore: offsetVal + limitVal < list.length,
+      totalCount: list.length
+    });
+  } else {
+    res.json(list);
+  }
+});
+
+// GET User Stats from cached profile (with automatic recalculation fallback)
+app.get("/api/users/:username/stats", async (req, res) => {
+  const { username } = req.params;
+  try {
+    const allUsersList = await getAllUsers();
+    const existingUser = allUsersList.find(
+      (u) => u.username.toLowerCase() === username.toLowerCase()
+    );
+
+    if (existingUser && existingUser.stats) {
+      res.json(existingUser.stats);
+      return;
+    }
+
+    // Recalculate, cache, and return
+    const stats = await recalculateAndCacheUserStats(username);
+    res.json(stats);
+  } catch (err: any) {
+    console.error(`Failed to get stats for ${username}:`, err);
+    res.status(500).json({ error: "Failed to load user stats" });
+  }
+});
+
+// POST Register FCM Token
+app.post("/api/register-fcm-token", async (req, res) => {
+  const { token, user } = req.body;
+  if (!token || !user) {
+    res.status(400).json({ error: "token and user are required" });
+    return;
+  }
+
+  try {
+    // If Admin SDK app is present and permission has not failed, re-enable FCM dispatch attempt
+    if (getAdminApps().length > 0 && !fcmPermissionDenied) {
+      fcmAvailable = true;
+    }
+
+    // 1. Save to local JSON file
+    const TOKENS_FILE = path.join(process.cwd(), "fcm_tokens.json");
+    let localTokens: { token: string; user: string; userLower: string; updatedAt: string }[] = [];
+    if (fs.existsSync(TOKENS_FILE)) {
+      try {
+        localTokens = JSON.parse(fs.readFileSync(TOKENS_FILE, "utf8"));
+      } catch (e) {}
+    }
+    // Remove old registration of this token
+    localTokens = localTokens.filter(t => t.token !== token);
+    localTokens.push({
+      token,
+      user,
+      userLower: user.toLowerCase().trim(),
+      updatedAt: new Date().toISOString()
+    });
+    fs.writeFileSync(TOKENS_FILE, JSON.stringify(localTokens, null, 2));
+
+    // 2. Save to Firestore
+    const firestore = getFirestoreInstance();
+    if (firestore && useFirestore) {
+      const docId = Buffer.from(token).toString("base64").substring(0, 50).replace(/[^a-zA-Z0-9]/g, "");
+      await setDoc(doc(firestore, "fcm_tokens", docId), {
+        token,
+        user,
+        userLower: user.toLowerCase().trim(),
+        updatedAt: new Date().toISOString()
+      });
+      console.log(`[FCM Server] Registered token for user ${user} (lower: ${user.toLowerCase().trim()}) in Firestore.`);
+    }
+
+    res.json({ success: true, message: "Token registered successfully" });
+  } catch (err) {
+    console.error("[FCM Server] Failed to register token:", err);
+    res.status(500).json({ error: "Failed to register token" });
+  }
+});
+
+// POST Send Test Push
+app.post("/api/send-test-push", async (req, res) => {
+  const { user } = req.body;
+  if (!user) {
+    res.status(400).json({ error: "User is required" });
+    return;
+  }
+  try {
+    await sendFCMNotification(
+      user,
+      "BeerReal System 🍻",
+      "A cold beer is calling your name! Everything's working through background FCM push."
+    );
+    res.json({ success: true, message: "Test push initiated" });
+  } catch (err) {
+    console.error("[FCM Server] Failed to send test push:", err);
+    res.status(500).json({ error: "Failed to send test push" });
+  }
+});
+
+// POST Beer Log
+app.post("/api/beers", async (req, res) => {
+  try {
+    const rawUser = (req.body.user || "Anonymous").toString().trim();
+    const user = rawUser || "Anonymous";
+    const { beerName, beerStyle, abv, date, rating, comment, imageUrl, hadCig, pubId } = req.body;
+
+    if (!user || !beerName || !beerStyle || abv === undefined || !date || rating === undefined) {
+      res.status(400).json({ error: "Missing required fields" });
+      return;
+    }
+
+    const normalized = normalizeBeerName(beerName);
+    const cleanedBeerName = normalized.name || beerName;
+    const cleanedStyle = (beerStyle && beerStyle !== "Other") ? beerStyle : (normalized.style || beerStyle || "Lager");
+    const cleanedAbv = Number(abv) || (normalized.abv || 5.0);
+
+    const newLog: BeerLog = {
+      id: `log-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      user,
+      beerName: cleanedBeerName,
+      beerStyle: cleanedStyle,
+      abv: cleanedAbv,
+      date,
+      rating: Number(rating),
+      cheers: [],
+      comment: comment || "",
+      imageUrl: imageUrl || undefined,
+      hadCig: !!hadCig,
+      pubId: pubId || undefined
+    };
+
+    const saved = await saveBeerLog(newLog);
+
+    // Send HTTP response immediately so the client UI unblocks instantly!
+    res.status(201).json(saved);
+
+    // Run notifications & user stats calculation in background
+    (async () => {
+      try {
+        const allBeersList = await getAllBeers();
+        const checkInDateStr = saved.date.split("T")[0]; // YYYY-MM-DD
+        const userLogsToday = allBeersList.filter(
+          (l) => l.user === saved.user && l.date.split("T")[0] === checkInDateStr
+        );
+
+        const notificationText = generateCreativeBeerNotificationText(
+          saved.beerName,
+          Number(saved.abv),
+          saved.date,
+          !!saved.hadCig,
+          userLogsToday.length
+        );
+
+        await createAndDispatchNotification({
+          user: saved.user,
+          text: notificationText,
+          date: saved.date,
+          type: "post",
+        });
+
+        // Trigger tag notifications if any valid users are tagged
+        if (saved.comment) {
+          const tags = await getValidTags(saved.comment);
+          for (const taggedUser of tags) {
+            if (taggedUser.toLowerCase().trim() !== saved.user.toLowerCase().trim()) {
+              const snippet = saved.comment.length > 40 ? saved.comment.substring(0, 40) + "..." : saved.comment;
+              await createAndDispatchNotification({
+                idPrefix: "notif-tag",
+                user: saved.user,
+                targetUser: taggedUser,
+                text: `tagged you in a post: "${snippet}" 🏷️`,
+                date: saved.date,
+                type: "tag",
+              });
+            }
+          }
+        }
+
+        if (userLogsToday.length >= 4) {
+          await createAndDispatchNotification({
+            idPrefix: `notif-bender-${userLogsToday.length}`,
+            user: saved.user,
+            text: `🚨 BENDER ALERT! <strong>${saved.user}</strong> is on a bender! Logged pint #${userLogsToday.length} today! 🥴🔥🍻`,
+            date: saved.date,
+            type: "bender",
+          });
+        }
+      } catch (err) {
+        console.error("Failed to generate notifications:", err);
+      }
+
+      try {
+        await recalculateAndCacheUserStats(saved.user);
+      } catch (err) {
+        console.error("Failed to recalculate user stats:", err);
+      }
+    })();
+  } catch (err: any) {
+    console.error("Error in POST /api/beers:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: err?.message || "Failed to post beer log" });
+    }
+  }
+});
+
+// POST Update/Enrich Beer Log
+app.post("/api/beers/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { beerName, beerStyle, abv, rating, comment, hadCig } = req.body;
+
+    const allBeersList = await getAllBeers();
+    const logIndex = allBeersList.findIndex((b) => b.id === id);
+    if (logIndex === -1) {
+      res.status(404).json({ error: "Beer log not found" });
+      return;
+    }
+
+    const log = allBeersList[logIndex];
+    if (beerName !== undefined) log.beerName = beerName;
+    if (beerStyle !== undefined) log.beerStyle = beerStyle;
+    if (abv !== undefined) log.abv = Number(abv);
+    if (rating !== undefined) log.rating = Number(rating);
+    if (comment !== undefined) log.comment = comment;
+    if (hadCig !== undefined) log.hadCig = !!hadCig;
+
+    await saveBeerLog(log);
+
+    // Return updated log immediately to unblock client
+    res.json(log);
+
+    // Background recalculate user stats
+    recalculateAndCacheUserStats(log.user).catch((err) => {
+      console.error("Failed to recalculate user stats on enrich:", err);
+    });
+  } catch (err: any) {
+    console.error("Error in POST /api/beers/:id:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to update beer log" });
+    }
+  }
+});
+
+// POST Toggle Cheers on a Log
+app.post("/api/beers/:id/cheers", async (req, res) => {
+  const { id } = req.params;
+  const username = (req.body.username || req.body.user || "").toString().trim();
+
+  if (!username) {
+    res.status(400).json({ error: "Username is required to cheer" });
+    return;
+  }
+
+  try {
+    const updated = await toggleBeerCheers(id, username);
+    if (!updated) {
+      res.status(404).json({ error: "Beer log not found" });
+      return;
+    }
+
+    // Trigger Notification if cheering someone else's post (and adding a cheer)
+    try {
+      if (updated.user && updated.user.toLowerCase() !== username.toLowerCase() && (updated.cheers || []).includes(username)) {
+        const beerNameStr = updated.beerName ? String(updated.beerName) : "";
+        const hasCustom = isUserCustomBeerName(beerNameStr);
+        const notifText = hasCustom
+          ? `cheered your pint of <strong>${beerNameStr.trim()}</strong>! 🍻`
+          : `cheered your pint! 🍻`;
+        await createAndDispatchNotification({
+          user: username,
+          targetUser: updated.user,
+          text: notifText,
+          type: "cheer",
+        });
+      }
+    } catch (err) {
+      console.error("Failed to generate cheer notification:", err);
+    }
+
+    // Recalculate stats for the post creator so that their totalCheers is perfectly accurate in the cache
+    if (updated.user) {
+      try {
+        await recalculateAndCacheUserStats(updated.user);
+      } catch (err) {
+        console.error("Failed to recalculate user stats on cheers:", err);
+      }
+    }
+
+    res.json(updated);
+  } catch (err) {
+    console.error(`Error in /api/beers/${id}/cheers:`, err);
+    res.status(500).json({ error: "Failed to toggle cheers" });
+  }
+});
+
+// POST Toggle Reaction on a Log
+app.post("/api/beers/:id/react", async (req, res) => {
+  const { id } = req.params;
+  const username = (req.body.username || req.body.user || "").toString().trim();
+  const { reactionType } = req.body;
+
+  if (!username) {
+    res.status(400).json({ error: "Username is required to react" });
+    return;
+  }
+  if (!reactionType) {
+    res.status(400).json({ error: "Reaction type is required" });
+    return;
+  }
+
+  try {
+    const updated = await toggleBeerReaction(id, username, reactionType);
+    if (!updated) {
+      res.status(404).json({ error: "Beer log not found" });
+      return;
+    }
+
+    // Trigger Notification if reacting to someone else's post
+    try {
+      if (updated.user && updated.user.toLowerCase() !== username.toLowerCase()) {
+        let reactionLabel = reactionType;
+        if (reactionType === "creamy") reactionLabel = "Creamy 🍺";
+        else if (reactionType === "cheers") reactionLabel = "Cheers 🍻";
+        else if (reactionType === "fomo") reactionLabel = "FOMO Alert 🚨";
+        else if (reactionType === "nightnight") reactionLabel = "Night night 🌙";
+        else if (reactionType === "drunk") reactionLabel = "Drunk 🥴";
+        else if (reactionType === "juicy") reactionLabel = "Juicy 🍑";
+        else if (reactionType === "dislike") reactionLabel = "Imposter Pint! 🕵️";
+
+        const beerNameStr = updated.beerName ? String(updated.beerName) : "";
+        const hasCustom = isUserCustomBeerName(beerNameStr);
+        const notifText = hasCustom
+          ? `reacted with <strong>${reactionLabel}</strong> to your pint of <strong>${beerNameStr.trim()}</strong>!`
+          : `reacted with <strong>${reactionLabel}</strong> to your pint!`;
+
+        await createAndDispatchNotification({
+          user: username,
+          targetUser: updated.user,
+          text: notifText,
+          type: "reaction",
+        });
+
+        if (reactionType === "dislike") {
+          const imposterNotifText = hasCustom
+            ? `🚨 IMPOSTER PINT OUTED! 🕵️ caught <strong>${updated.user}</strong> logging a fake pint of <strong>${beerNameStr.trim()}</strong>!`
+            : `🚨 IMPOSTER PINT OUTED! 🕵️ caught <strong>${updated.user}</strong> logging a fake pint!`;
+          await createAndDispatchNotification({
+            idPrefix: "imposter",
+            user: username,
+            text: imposterNotifText,
+            type: "imposter",
+          });
+        }
+      }
+    } catch (err) {
+      console.error("Failed to generate reaction notification:", err);
+    }
+
+    res.json(updated);
+  } catch (err) {
+    console.error(`Error in /api/beers/${id}/react:`, err);
+    res.status(500).json({ error: "Failed to toggle reaction" });
+  }
+});
+
+// DELETE a log
+app.delete("/api/beers/:id", async (req, res) => {
+  const { id } = req.params;
+  const currentUser = (req.query.currentUser || req.headers["x-current-user"] || "").toString().trim();
+
+  const log = await findBeerLogById(id);
+
+  if (log) {
+    const beerUser = log.user || "";
+    const isOwner = currentUser.toLowerCase().trim() === beerUser.toLowerCase().trim();
+    const isAdmin = isSeymoreBeers(currentUser);
+
+    if (!isOwner && !isAdmin) {
+      res.status(403).json({ error: "Unauthorized. You can only delete your own posts." });
+      return;
+    }
+  }
+
+  const beerUserToUpdate = log?.user;
+
+  await deleteBeerLog(id);
+
+  if (beerUserToUpdate) {
+    // Recalculate user statistics asynchronously
+    recalculateAndCacheUserStats(beerUserToUpdate).catch((e) =>
+      console.error("Error recalculating stats after delete:", e)
+    );
+  }
+
+  res.json({ success: true });
+});
+
+// POST Comment to a Log
+app.post("/api/beers/:id/comments", async (req, res) => {
+  const { id } = req.params;
+  const { user, text } = req.body;
+
+  if (!user || !text) {
+    res.status(400).json({ error: "User and comment text are required" });
+    return;
+  }
+
+  const updated = await addBeerComment(id, user, text);
+  if (!updated) {
+    res.status(404).json({ error: "Beer log not found" });
+    return;
+  }
+
+  // Trigger Notification if commenting on someone else's post
+  try {
+    if (updated.user !== user) {
+      const snippet = text.length > 30 ? text.substring(0, 30) + "..." : text;
+      const hasCustom = isUserCustomBeerName(updated.beerName);
+      const notifText = hasCustom
+        ? `commented on your pint of <strong>${updated.beerName.trim()}</strong>: "${snippet}" 💬`
+        : `commented on your pint: "${snippet}" 💬`;
+
+      await createAndDispatchNotification({
+        user: user,
+        targetUser: updated.user,
+        text: notifText,
+        type: "comment",
+      });
+    }
+
+    // Trigger tag notifications if any valid users are tagged in the comment
+    const tags = await getValidTags(text);
+    for (const taggedUser of tags) {
+      if (
+        taggedUser.toLowerCase().trim() !== user.toLowerCase().trim() &&
+        taggedUser.toLowerCase().trim() !== updated.user.toLowerCase().trim()
+      ) {
+        const snippet = text.length > 30 ? text.substring(0, 30) + "..." : text;
+        await createAndDispatchNotification({
+          idPrefix: "notif-tag",
+          user: user,
+          targetUser: taggedUser,
+          text: `tagged you in a comment: "${snippet}" 🏷️`,
+          type: "tag",
+        });
+      }
+    }
+  } catch (err) {
+    console.error("Failed to generate comment notification:", err);
+  }
+
+  res.status(201).json(updated);
+});
+
+// DELETE Comment from a Log
+app.delete("/api/beers/:id/comments/:commentId", async (req, res) => {
+  const { id, commentId } = req.params;
+  const currentUser = (req.query.currentUser || req.headers["x-current-user"] || "").toString();
+
+  const allBeersList = await getAllBeers();
+  const log = allBeersList.find((b) => b.id === id);
+  if (log) {
+    const comment = (log.comments || []).find((c) => c.id === commentId);
+    if (comment) {
+      const isOwner = currentUser.toLowerCase().trim() === comment.user.toLowerCase().trim();
+      const isAdmin = isSeymoreBeers(currentUser);
+      if (!isOwner && !isAdmin) {
+        res.status(403).json({ error: "Unauthorized. You can only delete your own comments." });
+        return;
+      }
+    }
+  }
+
+  const updated = await deleteBeerComment(id, commentId);
+  if (!updated) {
+    res.status(404).json({ error: "Beer log not found" });
+    return;
+  }
+
+  res.json(updated);
+});
+
+// GET Notifications
+app.get("/api/notifications", async (req, res) => {
+  const list = await getAllNotifications();
+  res.json(list);
+});
+
+// POST Mark Notifications as Read
+app.post("/api/notifications/read", async (req, res) => {
+  const { username } = req.body;
+  if (!username) {
+    res.status(400).json({ error: "Username is required to mark notifications as read" });
+    return;
+  }
+  await markNotificationsRead(username);
+  res.json({ success: true });
+});
+
+// POST Login
+app.post("/api/login", async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    res.status(400).json({ error: "Username and password are required" });
+    return;
+  }
+
+  const allUsers = await getAllUsers();
+  const user = allUsers.find(
+    (u) => u.username.toLowerCase() === username.toLowerCase()
+  );
+
+  if (!user) {
+    res.status(401).json({ error: "User profile not found. Please create an account." });
+    return;
+  }
+
+  const userPassword = user.password || "Pints!";
+  if (userPassword !== password) {
+    res.status(401).json({ error: "Incorrect password. (The default is 'Pints!' for existing users)." });
+    return;
+  }
+
+  res.json({ success: true, user });
+});
+
+// GET Users
+app.get("/api/users", async (req, res) => {
+  const list = await getAllUsers();
+  res.json(list);
+});
+
+// POST User Profile
+app.post("/api/users", async (req, res) => {
+  const { username, favoriteStyle, avatar, bio, password, realName, photoUrl } = req.body;
+
+  if (!username || !favoriteStyle || !avatar) {
+    res.status(400).json({ error: "Missing required profile fields" });
+    return;
+  }
+
+  const allUsersList = await getAllUsers();
+  const existingIndex = allUsersList.findIndex(
+    (u) => u.username.toLowerCase() === username.toLowerCase()
+  );
+
+  const existingUser = existingIndex !== -1 ? allUsersList[existingIndex] : null;
+
+  const profile: UserProfile = {
+    username,
+    favoriteStyle,
+    avatar,
+    bio: bio || "",
+    joinedDate: existingUser ? existingUser.joinedDate : new Date().toISOString().split("T")[0],
+    password: password || (existingUser ? (existingUser.password || "Pints!") : "Pints!"),
+    realName: realName || (existingUser ? existingUser.realName : undefined),
+    photoUrl: photoUrl !== undefined ? photoUrl : (existingUser ? existingUser.photoUrl : undefined)
+  };
+
+  const isNewUser = !existingUser;
+  const saved = await saveUser(profile);
+
+  if (isNewUser) {
+    try {
+      const notif: AppNotification = {
+        id: "newuser-" + username + "-" + Date.now(),
+        user: username,
+        text: `🎉 A new user, <strong>${realName || username}</strong>, just joined BeerReal! Give them a warm welcome! 🍻`,
+        date: new Date().toISOString(),
+        readBy: [],
+        type: "post"
+      };
+      await saveNotification(notif);
+      console.log(`[Notification] Created new user notification for ${username}`);
+    } catch (err) {
+      console.error("Failed to generate new user notification:", err);
+    }
+  }
+
+  res.json(saved);
+});
+
+// DELETE User Profile and clean up their beer logs
+app.delete("/api/users/:username", async (req, res) => {
+  const { username } = req.params;
+  const currentUser = req.query.currentUser || req.headers["x-current-user"];
+  if (!isSeymoreBeers(currentUser)) {
+    res.status(403).json({ error: "Unauthorized. Only Seymore Beers can delete profiles." });
+    return;
+  }
+
+  const deleted = await deleteUser(username);
+  if (!deleted) {
+    res.status(404).json({ error: "User profile not found" });
+    return;
+  }
+  res.json({ success: true, username });
+});
+
+// GET Pubs
+app.get("/api/pubs", async (req, res) => {
+  const list = await getAllPubs();
+  res.json(list);
+});
+
+// GET Pub Chat Messages
+app.get("/api/pubs/:id/messages", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      res.json([]);
+      return;
+    }
+    const list = await getPubMessages(id);
+    res.json(list || []);
+  } catch (err) {
+    console.error(`Error fetching pub messages for ${req.params.id}:`, err);
+    res.status(500).json({ error: "Failed to fetch pub messages" });
+  }
+});
+
+// POST Pub Chat Message
+app.post("/api/pubs/:id/messages", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = (req.body.user || req.body.username || "").toString().trim();
+    const text = (req.body.text || "").toString().trim();
+
+    if (!user || !text) {
+      res.status(400).json({ error: "User and message text are required." });
+      return;
+    }
+
+    const msg: PubChatMessage = {
+      id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      pubId: id,
+      user,
+      text,
+      date: new Date().toISOString(),
+    };
+
+    const saved = await savePubChatMessage(msg);
+    res.status(201).json(saved);
+  } catch (err) {
+    console.error(`Error saving pub chat message for ${req.params.id}:`, err);
+    res.status(500).json({ error: "Failed to save message" });
+  }
+});
+
+// POST Create or Update Pub
+app.post("/api/pubs", async (req, res) => {
+  const { id, name, owner, members, invited, emblem } = req.body;
+
+  if (!name || !owner) {
+    res.status(400).json({ error: "Pub name and owner are required." });
+    return;
+  }
+
+  const pubId = id || `pub-${Date.now()}`;
+  const pub: Pub = {
+    id: pubId,
+    name,
+    owner,
+    members: members || [owner],
+    invited: invited || [],
+    emblem: emblem || ""
+  };
+
+  const saved = await savePub(pub);
+
+  // If there are new invited members, create notifications
+  if (invited && invited.length > 0) {
+    for (const invitee of invited) {
+      await createAndDispatchNotification({
+        idPrefix: "notif-pub",
+        user: owner,
+        targetUser: invitee,
+        text: `invited you to join the Pub: "${name}"! 🍻`,
+        type: "invite",
+      });
+    }
+  }
+
+  res.json(saved);
+});
+
+// POST Join Pub
+app.post("/api/pubs/:id/join", async (req, res) => {
+  const { id } = req.params;
+  const username = (req.body.username || req.body.user || "").toString().trim();
+
+  if (!username) {
+    res.status(400).json({ error: "Username is required to join a Pub." });
+    return;
+  }
+
+  const allPubsList = await getAllPubs();
+  const pub = allPubsList.find((p) => p.id === id);
+
+  if (!pub) {
+    res.status(404).json({ error: "Pub not found" });
+    return;
+  }
+
+  // Add to members if not already
+  if (!pub.members.includes(username)) {
+    pub.members.push(username);
+  }
+
+  // Remove from invited
+  pub.invited = pub.invited.filter((u) => u !== username);
+
+  const saved = await savePub(pub);
+
+  // Notify members of the pub only (excluding the person who joined) saying they have entered the pub, who is buying the first round
+  for (const member of pub.members) {
+    if (member.toLowerCase().trim() === username.toLowerCase().trim()) {
+      continue;
+    }
+    await createAndDispatchNotification({
+      idPrefix: `notif-pub-join-${pub.id}-${member.toLowerCase().trim()}`,
+      user: username,
+      targetUser: member,
+      text: `has entered ${pub.name}! Who's buying the first round? 🍻`,
+    });
+  }
+
+  res.json(saved);
+});
+
+// POST Invite to Pub
+app.post("/api/pubs/:id/invite", async (req, res) => {
+  const { id } = req.params;
+  const { invitees, sender } = req.body; // array of usernames
+
+  if (!invitees || !Array.isArray(invitees)) {
+    res.status(400).json({ error: "Invitees list is required and must be an array." });
+    return;
+  }
+
+  const allPubsList = await getAllPubs();
+  const pub = allPubsList.find((p) => p.id === id);
+
+  if (!pub) {
+    res.status(404).json({ error: "Pub not found" });
+    return;
+  }
+
+  let updated = false;
+  for (const invitee of invitees) {
+    if (!pub.members.includes(invitee) && !pub.invited.includes(invitee)) {
+      pub.invited.push(invitee);
+      updated = true;
+
+      // Send invite notification
+      await createAndDispatchNotification({
+        idPrefix: "notif-pub-invite",
+        user: sender || pub.owner,
+        targetUser: invitee,
+        text: `invited you to join the Pub: "${pub.name}"! 🍻`,
+        type: "invite",
+      });
+    }
+  }
+
+  if (updated) {
+    await savePub(pub);
+  }
+
+  res.json(pub);
+});
+
+// POST Leave Pub
+app.post("/api/pubs/:id/leave", async (req, res) => {
+  const { id } = req.params;
+  const username = (req.body.username || req.body.user || "").toString().trim();
+
+  if (!username) {
+    res.status(400).json({ error: "Username is required to leave a Pub." });
+    return;
+  }
+
+  const allPubsList = await getAllPubs();
+  const pub = allPubsList.find((p) => p.id === id);
+
+  if (!pub) {
+    res.status(404).json({ error: "Pub not found" });
+    return;
+  }
+
+  // Remove from members
+  pub.members = pub.members.filter((u) => u !== username);
+
+  let saved;
+  if (pub.members.length === 0) {
+    // Delete if no members left
+    await deletePub(id);
+    saved = { deleted: true, id };
+  } else {
+    // If owner left, assign new owner
+    if (pub.owner === username) {
+      pub.owner = pub.members[0];
+    }
+    saved = await savePub(pub);
+  }
+
+  res.json(saved);
+});
+
+// DELETE Pub
+app.delete("/api/pubs/:id", async (req, res) => {
+  const { id } = req.params;
+  const currentUser = req.query.currentUser || req.headers["x-current-user"];
+
+  const allPubsList = await getAllPubs();
+  const pub = allPubsList.find((p) => p.id === id);
+
+  if (!pub) {
+    res.status(404).json({ error: "Pub not found" });
+    return;
+  }
+
+  // Check permission (owner or Admin Seymore Beers)
+  if (pub.owner !== currentUser && !isSeymoreBeers(currentUser as string)) {
+    res.status(403).json({ error: "Unauthorized. Only the owner or an Admin can delete a Pub." });
+    return;
+  }
+
+  await deletePub(id);
+  res.json({ success: true, id });
+});
+
+
+// --- VITE INTERFACE HANDLER ---
+
+async function startServer() {
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+  }
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://0.0.0.0:${PORT}`);
+    
+    // Background seeding if empty
+    try {
+      getFirestoreInstance();
+      if (useFirestore) {
+        seedFirestoreIfEmpty().catch((err) => console.error("Error seeding firestore:", err));
+      }
+    } catch (err) {
+      console.error("Failed to seed firestore on start:", err);
+    }
+  });
+}
+
+startServer();

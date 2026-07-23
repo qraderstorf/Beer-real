@@ -1,0 +1,221 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+/* Base style resets and scrollbar styles for a polished feeling */
+body,
+.min-h-screen {
+  background-color: #0b0f19 !important; /* Elegant dark slate/navy */
+  color: #f8fafc;
+}
+
+body {
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Dark mode overrides */
+.dark {
+  color-scheme: dark;
+}
+
+/* Main layouts and cards */
+.dark body,
+.dark .min-h-screen {
+  background-color: #0b0f19 !important; /* Elegant dark slate/navy */
+  color: #f1f5f9 !important;
+}
+
+.dark .bg-slate-50 {
+  background-color: #0b0f19 !important;
+}
+
+.dark .bg-white {
+  background-color: #161d2f !important; /* Slightly lighter slate */
+  color: #f1f5f9;
+}
+
+/* Borders and lines */
+.dark .border-slate-200,
+.dark .border-slate-200\/60,
+.dark .border-slate-100 {
+  border-color: #242f49 !important;
+}
+
+/* Interactive & Slate backgrounds */
+.dark .bg-slate-100 {
+  background-color: #202b42 !important;
+}
+
+.dark .bg-slate-200 {
+  background-color: #2d3c5c !important;
+}
+
+.dark .hover\:bg-slate-50:hover,
+.dark .hover\:bg-slate-100:hover {
+  background-color: #202b42 !important;
+}
+
+.dark .bg-slate-50\/50 {
+  background-color: rgba(22, 29, 47, 0.6) !important;
+}
+
+/* Text elements */
+.dark .text-slate-900,
+.dark .text-slate-850,
+.dark .text-slate-800,
+.dark .text-slate-700 {
+  color: #f8fafc !important;
+}
+
+.dark .text-slate-600,
+.dark .text-slate-500,
+.dark .text-slate-400 {
+  color: #94a3b8 !important;
+}
+
+/* Form Controls */
+.dark input,
+.dark textarea,
+.dark select {
+  background-color: #121824 !important;
+  color: #f8fafc !important;
+  border-color: #242f49 !important;
+}
+
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: #475569 !important;
+}
+
+/* Specific styling for custom/special states */
+.dark .bg-amber-50 {
+  background-color: #23190a !important; /* Dark warm gold background */
+}
+
+.dark .bg-amber-50\/30 {
+  background-color: rgba(35, 25, 10, 0.4) !important;
+}
+
+.dark .border-amber-100,
+.dark .border-amber-400 {
+  border-color: #78350f !important;
+}
+
+.dark .text-amber-800,
+.dark .text-amber-600,
+.dark .text-amber-950 {
+  color: #f59e0b !important;
+}
+
+.dark .bg-amber-500 {
+  background-color: #f59e0b !important;
+}
+
+.dark .hover\:bg-amber-600:hover {
+  background-color: #d97706 !important;
+}
+
+.dark .text-amber-500 {
+  color: #fbbf24 !important;
+}
+
+/* Modals, shadow covers, custom charts */
+.dark .shadow-sm,
+.dark .shadow-md,
+.dark .shadow-xl {
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -4px rgba(0, 0, 0, 0.5) !important;
+}
+
+.dark .shadow-inner {
+  box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.3) !important;
+}
+
+.dark .bg-red-50 {
+  background-color: #251214 !important;
+  border-color: #7f1d1d !important;
+}
+
+.dark .text-red-700 {
+  color: #fca5a5 !important;
+}
+
+/* Make sure the custom dot or lines in recharts align with dark mode */
+.dark .recharts-cartesian-grid-horizontal line,
+.dark .recharts-cartesian-grid-vertical line {
+  stroke: #1e293b !important;
+}
+
+.dark .recharts-text {
+  fill: #94a3b8 !important;
+}
+
+/* Navigation headers and sticky components */
+.dark header,
+.dark .sm\:hidden {
+  background-color: rgba(22, 29, 47, 0.95) !important;
+  backdrop-filter: blur(12px);
+}
+
+.dark .bg-white\/95 {
+  background-color: rgba(22, 29, 47, 0.95) !important;
+}
+
+.dark .bg-slate-100\/50 {
+  background-color: rgba(32, 43, 66, 0.5) !important;
+}
+
+/* Custom highly-polished comment styles */
+.comment-container {
+  overflow: hidden;
+  border-top: 1px solid #e2e8f0;
+  background-color: #f8fafc;
+}
+
+.dark .comment-container {
+  border-color: #242f49 !important;
+  background-color: #0e1320 !important; /* Rich, dark pocket background */
+}
+
+.comment-bubble {
+  background-color: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 10px 12px;
+  transition: all 0.2s ease;
+}
+
+.dark .comment-bubble {
+  background-color: #161d2f !important; /* Contrast container inside pocket */
+  border-color: #242f49 !important;
+}
+
+.comment-username {
+  font-weight: 700;
+  font-size: 11px;
+  color: #1e293b;
+}
+
+.dark .comment-username {
+  color: #f1f5f9 !important;
+}
+
+.comment-body {
+  margin-top: 4px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #334155;
+  font-weight: 450;
+}
+
+.dark .comment-body {
+  color: #cbd5e1 !important; /* Soft, warm white with excellent readability */
+}
+

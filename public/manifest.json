@@ -1,0 +1,19 @@
+{
+  "short_name": "BeerReal",
+  "name": "BeerReal - Social Beer Logging",
+  "description": "Collaborative social platform for friends to log beer tastings, check in, and view activity streams.",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any maskable"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "display": "standalone",
+  "orientation": "portrait",
+  "gcm_sender_id": "103953800533"
+}

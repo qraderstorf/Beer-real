@@ -1,0 +1,1487 @@
+import React, { useState, useMemo, useEffect } from "react";
+import { motion, AnimatePresence } from "motion/react";
+import {
+  Beer,
+  Star,
+  Percent,
+  TrendingUp,
+  Calendar,
+  Users,
+  ArrowUpDown,
+  Search,
+  Filter,
+  Flame,
+  ChevronDown,
+  Pin,
+  Trophy,
+  Crown,
+  Zap,
+  Coffee
+} from "lucide-react";
+import {
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  PieChart,
+  Pie,
+  Cell,
+  LabelList,
+  LineChart,
+  Line
+} from "recharts";
+import { BeerLog, UserProfile, TimeFilter, Pub } from "../types";
+import { getMostDrankBeerForUser } from "../utils";
+import UserAvatar from "./UserAvatar";
+
+interface StatisticsProps {
+  logs?: BeerLog[];
+  users: UserProfile[];
+  pubs: Pub[];
+  selectedPubId: string;
+  onPubSelect: (pubId: string) => void;
+  pinnedPubId?: string;
+  onPinPub?: (pubId: string) => void;
+  currentUser: string;
+  onViewProfileRequested?: (username: string) => void;
+  clientUseFirestore: boolean;
+}
+
+type SortKey = "date" | "user" | "beerName" | "abv" | "rating";
+type SortOrder = "asc" | "desc";
+
+const COLORS = [
+  "#d97706", // Amber / Gold
+  "#2563eb", // Royal Sapphire Blue
+  "#059669", // Emerald Green
+  "#e11d48", // Crimson Red
+  "#7c3aed", // Deep Violet
+  "#0284c7", // Sky Blue
+  "#ea580c", // Burnt Orange
+  "#6366f1", // Indigo
+  "#0d9488", // Teal
+  "#d946ef"  // Fuchsia
+];
+
+interface CacheEntry {
+  beers: BeerLog[];
+  pubMemberStats?: Record<string, { totalPints: number; avgRating: number; avgAbv: number }>;
+  timestamp: number;
+  latestLogId: string;
+}
+
+const leaderboardCache: Record<string, CacheEntry> = {};
+
+export default function Statistics({
+  logs = [],
+  users,
+  pubs,
+  selectedPubId,
+  onPubSelect,
+  pinnedPubId,
+  onPinPub,
+  currentUser,
+  onViewProfileRequested,
+  clientUseFirestore
+}: StatisticsProps) {
+  const [rangeFilter, setRangeFilter] = useState<"all_time" | "this_month" | "last_week" | "this_week">("this_week");
+  const [barLayout, setBarLayout] = useState<"stacked" | "grouped">("stacked");
+
+  const [leaderboardBeers, setLeaderboardBeers] = useState<BeerLog[]>([]);
+  const [pubMemberStats, setPubMemberStats] = useState<Record<string, { totalPints: number; avgRating: number; avgAbv: number }>>({});
+  const [loading, setLoading] = useState(false);
+  const [isDataTruncated, setIsDataTruncated] = useState(false);
+
+  // Absolute minimum start date (unrestricted)
+  const absoluteMinDate = useMemo(() => new Date(0), []);
+
+  // Fetch leaderboard beers only on mount, filter, or pub selection change, with no timer or background polling
+  useEffect(() => {
+    let isMounted = true;
+    const fetchLeaderboardBeers = async () => {
+      setLoading(true);
+      try {
+        const cacheKey = `${rangeFilter}_${clientUseFirestore}_${selectedPubId}`;
+        const latestLogId = logs.length > 0 ? logs[0].id : "";
+        const cached = leaderboardCache[cacheKey];
+
+        // Cache is valid if it exists, is less than 5 minutes old, and the latest feed log matches
+        if (cached && (Date.now() - cached.timestamp < 5 * 60 * 1000) && cached.latestLogId === latestLogId) {
+          console.log(`[Cache] Using cached leaderboard beers and aggregation stats for ${rangeFilter} / ${selectedPubId}`);
+          if (isMounted) {
+            setLeaderboardBeers(cached.beers);
+            setPubMemberStats(cached.pubMemberStats || {});
+            setLoading(false);
+          }
+          return;
+        }
+
+        const now = new Date();
+        let startDate = new Date(absoluteMinDate);
+        let endDate = new Date(now);
+
+        const dayOfWeek = now.getDay();
+        const daysSinceMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+        const mondayThisWeek = new Date(now);
+        mondayThisWeek.setDate(now.getDate() - daysSinceMonday);
+        mondayThisWeek.setHours(0, 0, 0, 0);
+
+        if (rangeFilter === "this_week") {
+          startDate = mondayThisWeek;
+          const sundayThisWeek = new Date(mondayThisWeek);
+          sundayThisWeek.setDate(mondayThisWeek.getDate() + 6);
+          sundayThisWeek.setHours(23, 59, 59, 999);
+          endDate = sundayThisWeek;
+        } else if (rangeFilter === "last_week") {
+          const mondayLastWeek = new Date(mondayThisWeek);
+          mondayLastWeek.setDate(mondayThisWeek.getDate() - 7);
+          startDate = mondayLastWeek;
+          
+          const sundayLastWeek = new Date(mondayLastWeek);
+          sundayLastWeek.setDate(mondayLastWeek.getDate() + 6);
+          sundayLastWeek.setHours(23, 59, 59, 999);
+          endDate = sundayLastWeek;
+        } else if (rangeFilter === "this_month") {
+          startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+          endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+        } else if (rangeFilter === "all_time") {
+          startDate = new Date(absoluteMinDate);
+          endDate = new Date(now.getFullYear(), 11, 31, 23, 59, 59, 999);
+        }
+
+        if (rangeFilter === "this_month" || rangeFilter === "all_time") {
+          const todayEnd = new Date(now);
+          todayEnd.setHours(23, 59, 59, 999);
+          if (endDate > todayEnd) {
+            endDate = todayEnd;
+          }
+        }
+
+        if (startDate < absoluteMinDate) {
+          startDate = new Date(absoluteMinDate);
+        }
+
+        const startDateStr = startDate.toISOString();
+        const endDateStr = endDate.toISOString();
+
+        let fetchedBeers: BeerLog[] = [];
+        let statsMap: Record<string, { totalPints: number; avgRating: number; avgAbv: number }> = {};
+
+        let memberIds: string[] = [];
+        let isScopedFilter = false;
+
+        if (selectedPubId && selectedPubId !== "global" && selectedPubId !== "all") {
+          const activePub = pubs ? pubs.find(p => p.id === selectedPubId) : null;
+          if (activePub) {
+            memberIds = activePub.members;
+            isScopedFilter = true;
+          }
+        }
+
+        let fetchedFromApi = false;
+        try {
+          const res = await fetch(`/api/leaderboard-beers?startDate=${encodeURIComponent(startDateStr)}&endDate=${encodeURIComponent(endDateStr)}`);
+          if (res.ok) {
+            fetchedBeers = await res.json();
+            fetchedFromApi = true;
+          }
+        } catch (apiErr) {
+          console.warn("[Cache] Failed to fetch leaderboard beers from server cache, will use fallback query:", apiErr);
+        }
+
+        let hitLimit = false;
+
+        // Defensive fallback to direct Firestore query ONLY if the high-performance API failed
+        if (!fetchedFromApi && clientUseFirestore) {
+          try {
+            const { db } = await import("../firebase");
+            const { collection, query, where, getDocs, limit } = await import("firebase/firestore");
+            if (db) {
+              if (isScopedFilter && memberIds.length > 0) {
+                const chunks = [];
+                for (let i = 0; i < memberIds.length; i += 30) {
+                  chunks.push(memberIds.slice(i, i + 30));
+                }
+                const promises = chunks.map(async (chunk) => {
+                  const q = query(
+                    collection(db, "beers"),
+                    where("user", "in", chunk),
+                    where("date", ">=", startDateStr),
+                    where("date", "<=", endDateStr),
+                    limit(500)
+                  );
+                  const snap = await getDocs(q);
+                  if (snap.docs.length >= 500) hitLimit = true;
+                  const chunkBeers: BeerLog[] = [];
+                  snap.forEach((doc) => {
+                    chunkBeers.push(doc.data() as BeerLog);
+                  });
+                  return chunkBeers;
+                });
+                const results = await Promise.all(promises);
+                fetchedBeers = results.flat();
+              } else {
+                const q = query(
+                  collection(db, "beers"),
+                  where("date", ">=", startDateStr),
+                  where("date", "<=", endDateStr),
+                  limit(500)
+                );
+                const snap = await getDocs(q);
+                if (snap.docs.length >= 500) hitLimit = true;
+                snap.forEach((doc) => {
+                  fetchedBeers.push(doc.data() as BeerLog);
+                });
+              }
+            }
+          } catch (fsErr) {
+            console.warn("[Statistics] Firestore query failed or unavailable, using cached beers fallback:", fsErr);
+          }
+        }
+
+        // Final fallback if both API and direct Firestore failed or are disabled: filter logs from props
+        if (!fetchedFromApi && fetchedBeers.length === 0 && logs && logs.length > 0) {
+          const start = new Date(startDateStr).getTime();
+          const end = new Date(endDateStr).getTime();
+          fetchedBeers = logs.filter((l) => {
+            const t = new Date(l.date).getTime();
+            return t >= start && t <= end;
+          });
+        }
+
+        if (hitLimit) {
+          console.warn("[Statistics] Query reached dataset limit of 500 logs. Displaying warning badge in UI.");
+        }
+        setIsDataTruncated(hitLimit);
+
+        // Compute high-precision aggregation metrics for each member client-side from the already-fetched beers!
+        // This completely eliminates any direct Firestore aggregation reads, resulting in 0 reads for this step.
+        const targetUserIds = memberIds.length > 0 ? memberIds : users.map(u => u.username);
+        targetUserIds.forEach((memberId) => {
+          const memberBeers = fetchedBeers.filter((b) => b.user === memberId);
+          const ratedBeers = memberBeers.filter((b) => b.rating && b.rating > 0);
+          const abvBeers = memberBeers.filter((b) => b.abv && b.abv > 0);
+
+          const totalPints = memberBeers.length;
+          const totalRating = ratedBeers.reduce((acc, b) => acc + (b.rating || 0), 0);
+          const avgRating = ratedBeers.length > 0 ? parseFloat((totalRating / ratedBeers.length).toFixed(1)) : 0;
+
+          const totalAbv = abvBeers.reduce((acc, b) => acc + (b.abv || 0), 0);
+          const avgAbv = abvBeers.length > 0 ? parseFloat((totalAbv / abvBeers.length).toFixed(1)) : 0;
+
+          statsMap[memberId] = {
+            totalPints,
+            avgRating,
+            avgAbv
+          };
+        });
+
+        if (isMounted) {
+          fetchedBeers.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+          
+          // Save to module cache
+          leaderboardCache[cacheKey] = {
+            beers: fetchedBeers,
+            pubMemberStats: statsMap,
+            timestamp: Date.now(),
+            latestLogId
+          };
+
+          setLeaderboardBeers(fetchedBeers);
+          setPubMemberStats(statsMap);
+        }
+      } catch (err) {
+        console.error("Failed to fetch leaderboard beers:", err);
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    fetchLeaderboardBeers();
+    return () => {
+      isMounted = false;
+    };
+  }, [rangeFilter, clientUseFirestore, absoluteMinDate, selectedPubId, pubs, logs, currentUser]);
+
+  const { filteredUsers, filteredPubLogs } = useMemo(() => {
+    if (!selectedPubId || selectedPubId === "global" || selectedPubId === "all") {
+      return { filteredUsers: users, filteredPubLogs: leaderboardBeers };
+    }
+    const activePub = pubs ? pubs.find(p => p.id === selectedPubId) : null;
+    if (!activePub) {
+      return { filteredUsers: users, filteredPubLogs: leaderboardBeers };
+    }
+    const mSet = new Set(activePub.members);
+    return {
+      filteredUsers: users.filter(u => mSet.has(u.username)),
+      filteredPubLogs: leaderboardBeers.filter(l => mSet.has(l.user))
+    };
+  }, [leaderboardBeers, users, pubs, selectedPubId]);
+
+  const [excludedUsers, setExcludedUsers] = useState<string[]>([]);
+  const [isCompareDropdownOpen, setIsCompareDropdownOpen] = useState(false);
+
+  // Derive selectedUsers from filteredUsers, filteredPubLogs, and excludedUsers
+  const selectedUsers = useMemo(() => {
+    const userSet = new Set<string>();
+    filteredUsers.forEach((u) => userSet.add(u.username));
+    filteredPubLogs.forEach((l) => {
+      if (l.user) userSet.add(l.user);
+    });
+    return Array.from(userSet).filter((username) => !excludedUsers.includes(username));
+  }, [filteredUsers, filteredPubLogs, excludedUsers]);
+
+  // Reset exclusions when the selected pub changes
+  useEffect(() => {
+    setExcludedUsers([]);
+  }, [selectedPubId]);
+
+  const [tableSearch, setTableSearch] = useState("");
+  const [sortKey, setSortKey] = useState<SortKey>("date");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
+
+  // Handler to toggle user selection for comparison
+  const handleToggleUser = (username: string) => {
+    if (excludedUsers.includes(username)) {
+      setExcludedUsers(excludedUsers.filter((u) => u !== username));
+    } else {
+      // Ensure we don't exclude the last remaining user
+      if (selectedUsers.length > 1) {
+        setExcludedUsers([...excludedUsers, username]);
+      }
+    }
+  };
+
+  const handleSelectAllUsers = () => {
+    setExcludedUsers([]);
+  };
+
+  const handleSelectNoneUsers = () => {
+    if (filteredUsers.length > 0) {
+      const firstUser = filteredUsers[0].username;
+      setExcludedUsers(filteredUsers.map((u) => u.username).filter((u) => u !== firstUser));
+    }
+  };
+
+  // Compute start/end dates based on rangeFilter
+  const dateRange = useMemo(() => {
+    const now = new Date();
+    let startDate = new Date(absoluteMinDate);
+    let endDate = new Date(now);
+
+    const dayOfWeek = now.getDay();
+    const daysSinceMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+    const mondayThisWeek = new Date(now);
+    mondayThisWeek.setDate(now.getDate() - daysSinceMonday);
+    mondayThisWeek.setHours(0, 0, 0, 0);
+
+    if (rangeFilter === "this_week") {
+      startDate = mondayThisWeek;
+      const sundayThisWeek = new Date(mondayThisWeek);
+      sundayThisWeek.setDate(mondayThisWeek.getDate() + 6);
+      sundayThisWeek.setHours(23, 59, 59, 999);
+      endDate = sundayThisWeek;
+    } else if (rangeFilter === "last_week") {
+      const mondayLastWeek = new Date(mondayThisWeek);
+      mondayLastWeek.setDate(mondayThisWeek.getDate() - 7);
+      startDate = mondayLastWeek;
+      
+      const sundayLastWeek = new Date(mondayLastWeek);
+      sundayLastWeek.setDate(mondayLastWeek.getDate() + 6);
+      sundayLastWeek.setHours(23, 59, 59, 999);
+      endDate = sundayLastWeek;
+    } else if (rangeFilter === "this_month") {
+      startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+      endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+    } else if (rangeFilter === "all_time") {
+      startDate = new Date(absoluteMinDate);
+      endDate = new Date(now.getFullYear(), 11, 31, 23, 59, 59, 999);
+    }
+
+    // Clip the future portion of endDate for all_time and this_month so the graph ends at today and grows dynamically
+    if (rangeFilter === "this_month" || rangeFilter === "all_time") {
+      const todayEnd = new Date(now);
+      todayEnd.setHours(23, 59, 59, 999);
+      if (endDate > todayEnd) {
+        endDate = todayEnd;
+      }
+    }
+
+    if (startDate < absoluteMinDate) {
+      startDate = new Date(absoluteMinDate);
+    }
+
+    return { startDate, endDate };
+  }, [rangeFilter, absoluteMinDate]);
+
+  // Helper to check if a log falls into the selected time frame
+  const filteredLogs = useMemo(() => {
+    const { startDate, endDate } = dateRange;
+
+    return filteredPubLogs.filter((log) => {
+      // User filter (if explicitly excluded)
+      if (excludedUsers.includes(log.user)) return false;
+
+      // Time filter
+      const logDate = new Date(log.date);
+      if (isNaN(logDate.getTime())) return false;
+
+      return logDate >= startDate && logDate <= endDate;
+    });
+  }, [filteredPubLogs, dateRange, excludedUsers]);
+
+  // Determine grouping viewMode automatically from the selected range filter with dynamic scaling
+  const viewMode = useMemo<"daily" | "weekly" | "monthly">(() => {
+    if (rangeFilter === "this_week" || rangeFilter === "last_week") {
+      return "daily";
+    }
+    if (rangeFilter === "this_month") {
+      // Monthly range is represented by days on the axis, so the numbers increase day by day
+      return "daily";
+    }
+    
+    // For "all_time", we scale dynamically:
+    // Starts as daily (this week), then moves to weekly, and finally to monthly as data spans more days.
+    if (filteredLogs.length === 0) {
+      return "daily";
+    }
+
+    const logTimes = filteredLogs.map((l) => new Date(l.date).getTime()).filter((t) => !isNaN(t));
+    if (logTimes.length === 0) {
+      return "daily";
+    }
+
+    const minTime = Math.min(...logTimes);
+    const maxTime = Math.max(...logTimes);
+    const diffMs = maxTime - minTime;
+    const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+
+    if (diffDays <= 7) {
+      return "daily"; // Starts as daily (like this week)
+    } else if (diffDays <= 60) {
+      return "weekly"; // Moves to weekly as time goes
+    } else {
+      return "monthly"; // Moves to monthly
+    }
+  }, [rangeFilter, filteredLogs]);
+
+  // Calculated Metrics
+  const metrics = useMemo(() => {
+    if (filteredLogs.length === 0) {
+      return {
+        totalBeers: 0,
+        avgRating: 0,
+        avgAbv: 0,
+        topBeer: "N/A",
+        avgPintsPerDay: 0
+      };
+    }
+
+    const totalBeers = filteredLogs.length;
+    
+    // Average Rating (exclude unrated logs, i.e., rating === 0)
+    const ratedLogs = filteredLogs.filter(b => b.rating > 0);
+    const totalRating = ratedLogs.reduce((acc, curr) => acc + curr.rating, 0);
+    const avgRating = ratedLogs.length > 0 ? parseFloat((totalRating / ratedLogs.length).toFixed(1)) : 0;
+
+    // Average ABV (exclude unspecified ABV logs, i.e., abv === 0)
+    const abvLogs = filteredLogs.filter(b => b.abv > 0);
+    const totalAbv = abvLogs.reduce((acc, curr) => acc + curr.abv, 0);
+    const avgAbv = abvLogs.length > 0 ? parseFloat((totalAbv / abvLogs.length).toFixed(1)) : 0;
+
+    // Top Beer
+    const beerCounts: Record<string, number> = {};
+    filteredLogs.forEach((log) => {
+      beerCounts[log.beerName] = (beerCounts[log.beerName] || 0) + 1;
+    });
+    let topBeer = "N/A";
+    let maxBeerCount = 0;
+    Object.entries(beerCounts).forEach(([beer, count]) => {
+      if (count > maxBeerCount) {
+        maxBeerCount = count;
+        topBeer = beer;
+      }
+    });
+
+    // Pints per day average
+    const { startDate, endDate } = dateRange;
+    const now = new Date();
+    const activeEnd = endDate < now ? endDate : now;
+    const activeStart = startDate < absoluteMinDate ? absoluteMinDate : startDate;
+    const diffTime = Math.abs(activeEnd.getTime() - activeStart.getTime());
+    const diffDays = Math.max(1, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
+    const avgPintsPerDay = parseFloat((totalBeers / diffDays).toFixed(2));
+
+    return {
+      totalBeers,
+      avgRating,
+      avgAbv,
+      topBeer,
+      avgPintsPerDay
+    };
+  }, [filteredLogs, dateRange, absoluteMinDate]);
+
+  // Chart 1 Data: Beer logs over time (Daily, Weekly, Yearly) - Cumulative Sum
+  const timelineChartData = useMemo(() => {
+    let rawData: any[] = [];
+
+    const { startDate, endDate } = dateRange;
+
+    if (viewMode === "daily") {
+      const buckets: { label: string; key: string }[] = [];
+      const current = new Date(startDate);
+      current.setHours(0, 0, 0, 0);
+
+      // Create daily buckets
+      while (current <= endDate) {
+        // Prettier label: DayOfWeek DayNumber (e.g. "Tue 14")
+        const dateStr = current.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
+        const key = current.toDateString();
+        buckets.push({
+          label: dateStr,
+          key
+        });
+        current.setDate(current.getDate() + 1);
+      }
+
+      const dataMap: Record<string, any> = {};
+      buckets.forEach((bucket) => {
+        dataMap[bucket.key] = {
+          date: bucket.label,
+          Total: 0
+        };
+        selectedUsers.forEach((u) => {
+          dataMap[bucket.key][u] = 0;
+        });
+      });
+
+      filteredLogs.forEach((log) => {
+        const logDate = new Date(log.date);
+        if (isNaN(logDate.getTime())) return;
+        const key = logDate.toDateString();
+        if (dataMap[key]) {
+          dataMap[key][log.user] = (dataMap[key][log.user] || 0) + 1;
+          dataMap[key]["Total"] = (dataMap[key]["Total"] || 0) + 1;
+        }
+      });
+
+      rawData = buckets.map((bucket) => dataMap[bucket.key]);
+    } else if (viewMode === "weekly") {
+      const buckets: { label: string; startDate: Date; endDate: Date; key: string }[] = [];
+      const current = new Date(startDate);
+      // Normalize current to the Monday of its week
+      const day = current.getDay();
+      const daysSinceMonday = day === 0 ? 6 : day - 1;
+      current.setDate(current.getDate() - daysSinceMonday);
+      current.setHours(0, 0, 0, 0);
+
+      while (current <= endDate) {
+        const monday = new Date(current);
+        const sunday = new Date(monday);
+        sunday.setDate(monday.getDate() + 6);
+        sunday.setHours(23, 59, 59, 999);
+
+        // Prettier label: compact week notation (e.g. "Wk: Jul 13")
+        const label = `Wk: ${monday.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
+        const key = monday.toDateString();
+
+        buckets.push({
+          label,
+          startDate: monday,
+          endDate: sunday,
+          key
+        });
+
+        current.setDate(current.getDate() + 7);
+      }
+
+      const dataMap: Record<string, any> = {};
+      buckets.forEach((bucket) => {
+        dataMap[bucket.key] = {
+          date: bucket.label,
+          Total: 0
+        };
+        selectedUsers.forEach((u) => {
+          dataMap[bucket.key][u] = 0;
+        });
+      });
+
+      filteredLogs.forEach((log) => {
+        const logDate = new Date(log.date);
+        if (isNaN(logDate.getTime())) return;
+
+        const matchingBucket = buckets.find(
+          (b) => logDate >= b.startDate && logDate <= b.endDate
+        );
+
+        if (matchingBucket) {
+          dataMap[matchingBucket.key][log.user] = (dataMap[matchingBucket.key][log.user] || 0) + 1;
+          dataMap[matchingBucket.key]["Total"] = (dataMap[matchingBucket.key]["Total"] || 0) + 1;
+        }
+      });
+
+      rawData = buckets.map((bucket) => dataMap[bucket.key]);
+    } else {
+      // Monthly View
+      const buckets: { label: string; key: string; year: number; month: number }[] = [];
+      const current = new Date(startDate);
+      current.setDate(1);
+      current.setHours(0, 0, 0, 0);
+
+      const endLimit = new Date(endDate);
+      endLimit.setDate(1);
+      endLimit.setHours(0, 0, 0, 0);
+
+      while (current <= endLimit) {
+        // Prettier label: short month name (e.g. "Jul") without confusing numeric years
+        const label = current.toLocaleDateString(undefined, { month: "short" });
+        const key = `${current.getFullYear()}-${current.getMonth()}`;
+
+        buckets.push({
+          label,
+          year: current.getFullYear(),
+          month: current.getMonth(),
+          key
+        });
+
+        current.setMonth(current.getMonth() + 1);
+      }
+
+      const dataMap: Record<string, any> = {};
+      buckets.forEach((bucket) => {
+        dataMap[bucket.key] = {
+          date: bucket.label,
+          Total: 0
+        };
+        selectedUsers.forEach((u) => {
+          dataMap[bucket.key][u] = 0;
+        });
+      });
+
+      filteredLogs.forEach((log) => {
+        const logDate = new Date(log.date);
+        if (isNaN(logDate.getTime())) return;
+
+        const key = `${logDate.getFullYear()}-${logDate.getMonth()}`;
+        if (dataMap[key]) {
+          dataMap[key][log.user] = (dataMap[key][log.user] || 0) + 1;
+          dataMap[key]["Total"] = (dataMap[key]["Total"] || 0) + 1;
+        }
+      });
+
+      rawData = buckets.map((bucket) => dataMap[bucket.key]);
+    }
+
+    // Accumulate values chronologically for cumulative sum over the selected time range
+    let runningTotal = 0;
+    const runningUserTotals: Record<string, number> = {};
+    selectedUsers.forEach((u) => {
+      runningUserTotals[u] = 0;
+    });
+
+    return rawData.map((item) => {
+      runningTotal += item.Total || 0;
+      const baseUserTotals: Record<string, number> = {};
+      selectedUsers.forEach((u) => {
+        runningUserTotals[u] += item[u] || 0;
+        baseUserTotals[u] = runningUserTotals[u];
+      });
+
+      // Group users by their exact cumulative value to stack tied lines cleanly
+      const valueGroups: Record<number, string[]> = {};
+      selectedUsers.forEach((u) => {
+        const val = baseUserTotals[u];
+        if (!valueGroups[val]) valueGroups[val] = [];
+        valueGroups[val].push(u);
+      });
+
+      const cumulativeItem: any = {
+        date: item.date,
+        Total: runningTotal
+      };
+
+      selectedUsers.forEach((u) => {
+        const rawVal = baseUserTotals[u];
+        const group = valueGroups[rawVal];
+        if (group && group.length > 1 && rawVal > 0) {
+          const idxInGroup = group.indexOf(u);
+          const offset = (idxInGroup - (group.length - 1) / 2) * 0.08;
+          cumulativeItem[u] = rawVal + offset;
+        } else {
+          cumulativeItem[u] = rawVal;
+        }
+      });
+
+      return cumulativeItem;
+    });
+  }, [filteredLogs, selectedUsers, viewMode, dateRange]);
+
+  // Chart 2 Data: User Comparison (Beer Counts)
+  const userComparisonData = useMemo(() => {
+    const { startDate, endDate } = dateRange;
+    const now = new Date();
+    const activeEnd = endDate < now ? endDate : now;
+    const activeStart = startDate < absoluteMinDate ? absoluteMinDate : startDate;
+    const diffTime = Math.abs(activeEnd.getTime() - activeStart.getTime());
+    const diffDays = Math.max(1, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
+
+    return selectedUsers.map((username) => {
+      const hasAggStats = pubMemberStats && pubMemberStats[username] !== undefined;
+      const beersCount = hasAggStats ? pubMemberStats[username].totalPints : filteredLogs.filter((l) => l.user === username).length;
+      
+      const avgRating = hasAggStats ? pubMemberStats[username].avgRating : (() => {
+        const ratings = filteredLogs.filter((l) => l.user === username && l.rating > 0).map((l) => l.rating);
+        return ratings.length > 0 ? parseFloat((ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(1)) : 0;
+      })();
+
+      const avgAbv = hasAggStats ? pubMemberStats[username].avgAbv : (() => {
+        const abvs = filteredLogs.filter((l) => l.user === username && l.abv > 0).map((l) => l.abv);
+        return abvs.length > 0 ? parseFloat((abvs.reduce((a, b) => a + b, 0) / abvs.length).toFixed(1)) : 0;
+      })();
+
+      const avgPintsPerDay = parseFloat((beersCount / diffDays).toFixed(2));
+
+      return {
+        name: username,
+        Pints: beersCount,
+        "Avg Rating": avgRating,
+        "Avg ABV": avgAbv,
+        avgPintsPerDay
+      };
+    }).filter(user => user.Pints > 0).sort((a, b) => {
+      if (b.Pints !== a.Pints) {
+        return b.Pints - a.Pints;
+      }
+      return b["Avg ABV"] - a["Avg ABV"];
+    });
+  }, [filteredLogs, selectedUsers, dateRange, absoluteMinDate, pubMemberStats]);
+
+  // Users who have drank at least 1 beer in the active filter
+  const usersWithBeerOnGraph = useMemo(() => {
+    return selectedUsers.filter((username) => {
+      return filteredLogs.some((l) => l.user === username);
+    });
+  }, [selectedUsers, filteredLogs]);
+
+  // Chart 3 Data: Beer Name distribution - Guinness vs Other Beers
+  const beerNameBreakdownData = useMemo(() => {
+    if (filteredLogs.length === 0) return [];
+
+    let guinnessCount = 0;
+    let otherCount = 0;
+
+    filteredLogs.forEach((log) => {
+      if (log.beerName && log.beerName.toLowerCase().includes("guinness")) {
+        guinnessCount++;
+      } else {
+        otherCount++;
+      }
+    });
+
+    const result = [];
+    if (guinnessCount > 0) {
+      result.push({ name: "Creamy Pint of Guinness", value: guinnessCount });
+    }
+    if (otherCount > 0) {
+      result.push({ name: "Not a Guinness", value: otherCount });
+    }
+
+    return result;
+  }, [filteredLogs]);
+
+  // Table sorting & searching
+  const handleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortOrder(sortOrder === "asc" ? "desc" : "asc");
+    } else {
+      setSortKey(key);
+      setSortOrder("desc");
+    }
+  };
+
+  const sortedAndSearchedLogs = useMemo(() => {
+    let result = [...filteredLogs];
+
+    // Apply Search
+    if (tableSearch.trim()) {
+      const term = tableSearch.toLowerCase();
+      result = result.filter(
+        (l) =>
+          l.beerName.toLowerCase().includes(term) ||
+          (l.comment && l.comment.toLowerCase().includes(term))
+      );
+    }
+
+    // Sort
+    result.sort((a, b) => {
+      let valA: any = a[sortKey];
+      let valB: any = b[sortKey];
+
+      if (sortKey === "date") {
+        valA = new Date(a.date).getTime();
+        valB = new Date(b.date).getTime();
+      }
+
+      if (typeof valA === "string") {
+        return sortOrder === "asc"
+          ? valA.localeCompare(valB)
+          : valB.localeCompare(valA);
+      } else {
+        return sortOrder === "asc" ? valA - valB : valB - valA;
+      }
+    });
+
+    const uniqueResult: BeerLog[] = [];
+    const seenIds = new Set<string>();
+    for (const item of result) {
+      if (item && item.id && !seenIds.has(item.id)) {
+        seenIds.add(item.id);
+        uniqueResult.push(item);
+      }
+    }
+
+    return uniqueResult;
+  }, [filteredLogs, tableSearch, sortKey, sortOrder]);
+
+  // Custom Dot renderer that draws clean, un-cluttered data markers for each line
+  const renderCustomDot = (props: any) => {
+    const { cx, cy, dataKey, payload } = props;
+    if (cx === undefined || cy === undefined) return <circle r={0} />;
+
+    const val = payload[dataKey];
+    if (val === undefined || val === 0) return <circle r={0} />; // don't draw dots for 0 or non-logged values
+
+    // Overlap clustering to shift overlapping markers when they are tied so you can see all of them!
+    let shiftX = 0;
+    let shiftY = 0;
+
+    // Find all selected users who have the exact same value at this payload point
+    const matchingUsers = selectedUsers.filter(u => payload[u] === val);
+    if (matchingUsers.length > 1) {
+      let offsetIndex = matchingUsers.indexOf(dataKey);
+      if (offsetIndex === -1) offsetIndex = 0;
+      const count = matchingUsers.length;
+      shiftX = (offsetIndex - (count - 1) / 2) * 8;
+      shiftY = (offsetIndex - (count - 1) / 2) * -8;
+    }
+
+    const index = selectedUsers.indexOf(dataKey);
+    const color = COLORS[index >= 0 ? index % COLORS.length : 0];
+
+    return (
+      <circle
+        key={`${dataKey}-${cx}-${cy}`}
+        cx={cx + shiftX}
+        cy={cy + shiftY}
+        r={4}
+        fill={color}
+        stroke="#ffffff"
+        strokeWidth={2}
+      />
+    );
+  };
+
+  return (
+    <div className="space-y-8" id="statistics-view">
+      {isDataTruncated && (
+        <div className="bg-amber-50 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-800/50 text-amber-900 dark:text-amber-300 px-4 py-3 rounded-xl text-xs flex items-center gap-3 shadow-sm animate-fade-in">
+          <span className="text-lg shrink-0">⚠️</span>
+          <div>
+            <p className="font-bold">Partial Dataset Notice</p>
+            <p className="text-amber-800/90 dark:text-amber-400/90 text-[11px] mt-0.5">
+              Query reached the 500-log display cap. Statistics for this period are computed from the 500 most recent records to maintain real-time speed.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Filters Panel */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 space-y-5">
+        <div className="pb-4 border-b border-slate-100">
+          <h2 className="text-xl font-black text-slate-800 tracking-tight">
+            The Ledger
+          </h2>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Pub Filter */}
+          <div className="space-y-2 animate-fade-in">
+            <span className="block text-xs font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+              Active Pub Community Filter
+            </span>
+            <div className="flex bg-slate-100 dark:bg-slate-900/50 p-1.5 rounded-xl border border-slate-200/40 dark:border-slate-800 gap-2 items-center">
+              <span className="text-xs font-bold text-slate-500 dark:text-slate-400 pl-2">Current View:</span>
+              <select
+                value={selectedPubId === "all" || !selectedPubId ? "global" : selectedPubId}
+                onChange={(e) => onPubSelect?.(e.target.value)}
+                className="flex-1 py-1.5 px-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg text-xs font-bold text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-amber-500/10 focus:border-amber-500 transition-all cursor-pointer"
+              >
+                <option value="global">🌍 Global Community (All Users)</option>
+                {pubs.filter(p => p.members.includes(currentUser)).map((p) => {
+                  const isImg = p.emblem && (p.emblem.startsWith("http://") || p.emblem.startsWith("https://") || p.emblem.startsWith("/") || p.emblem.startsWith("data:image"));
+                  const displayEmblem = p.emblem ? (isImg ? "🖼️" : p.emblem) : "🏠";
+                  return (
+                    <option key={p.id} value={p.id}>
+                      {displayEmblem} {p.name}
+                    </option>
+                  );
+                })}
+              </select>
+              {onPinPub && pinnedPubId !== (selectedPubId || "global") && (
+                <button
+                  type="button"
+                  id="pin-pub-stats-button"
+                  onClick={() => onPinPub(selectedPubId || "global")}
+                  title="Pin as default view to start"
+                  className="p-1.5 rounded-lg border transition-all shrink-0 bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-50"
+                >
+                  <Pin className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Top Date Range selector */}
+          <div className="space-y-2">
+            <span className="block text-xs font-bold uppercase tracking-wider text-slate-400">
+              Date Range Filter
+            </span>
+            <div className="flex flex-wrap bg-slate-100 p-1 rounded-md w-full gap-1">
+              {([
+                { id: "all_time", label: "All Time" },
+                { id: "this_month", label: "This Month" },
+                { id: "last_week", label: "Last Week" },
+                { id: "this_week", label: "This Week" }
+              ] as const).map((filter) => (
+                <button
+                  key={filter.id}
+                  onClick={() => setRangeFilter(filter.id)}
+                  className={`flex-1 text-[10px] font-bold py-1.5 px-2 rounded capitalize transition-all cursor-pointer whitespace-nowrap ${
+                    rangeFilter === filter.id
+                      ? "bg-white text-slate-800 shadow-sm"
+                      : "text-slate-500 hover:text-slate-800"
+                  }`}
+                >
+                  {filter.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="flex flex-col items-center justify-center py-24 bg-white rounded-xl border border-slate-200 shadow-sm space-y-4">
+          <div className="w-8 h-8 border-4 border-amber-500 border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-xs font-bold text-slate-500">Calculating community stats & pints poured... 🍻</p>
+        </div>
+      ) : (
+        <>
+          {/* KPI Cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+        {/* KPI 1: Total Pints */}
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex items-center gap-4">
+          <div className="p-2.5 bg-amber-50 text-amber-500 rounded-lg shrink-0">
+            <Beer className="w-5 h-5" />
+          </div>
+          <div className="min-w-0">
+            <span className="text-[10px] text-slate-400 font-bold block uppercase tracking-wider truncate">Total Pints</span>
+            <span className="text-xl font-bold text-slate-850">{metrics.totalBeers}</span>
+          </div>
+        </div>
+
+        {/* KPI 2: Pints Per Day */}
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex items-center gap-4">
+          <div className="p-2.5 bg-amber-50 text-amber-500 rounded-lg shrink-0">
+            <Calendar className="w-5 h-5" />
+          </div>
+          <div className="min-w-0">
+            <span className="text-[10px] text-slate-400 font-bold block uppercase tracking-wider truncate">Pints / Day</span>
+            <span className="text-xl font-bold text-slate-850">{metrics.avgPintsPerDay}</span>
+          </div>
+        </div>
+
+        {/* KPI 3: Avg Rating */}
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex items-center gap-4">
+          <div className="p-2.5 bg-amber-50 text-amber-500 rounded-lg shrink-0">
+            <Star className="w-5 h-5 fill-amber-500 text-amber-500" />
+          </div>
+          <div className="min-w-0">
+            <span className="text-[10px] text-slate-400 font-bold block uppercase tracking-wider truncate">Avg Rating</span>
+            <span className="text-xl font-bold text-slate-850">
+              {metrics.avgRating > 0 ? `${metrics.avgRating} / 5` : "N/A"}
+            </span>
+          </div>
+        </div>
+
+        {/* KPI 4: Avg ABV */}
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex items-center gap-4">
+          <div className="p-2.5 bg-amber-50 text-amber-500 rounded-lg shrink-0">
+            <Percent className="w-5 h-5" />
+          </div>
+          <div className="min-w-0">
+            <span className="text-[10px] text-slate-400 font-bold block uppercase tracking-wider truncate">Avg ABV</span>
+            <span className="text-xl font-bold text-slate-850">
+              {metrics.avgAbv > 0 ? `${metrics.avgAbv}%` : "N/A"}
+            </span>
+          </div>
+        </div>
+
+        {/* KPI 5: Top Beer (Spans 2 cols on mobile for balance) */}
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex items-center gap-4 col-span-2 lg:col-span-1">
+          <div className="p-2.5 bg-amber-50 text-amber-500 rounded-lg shrink-0">
+            <TrendingUp className="w-5 h-5" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <span className="text-[10px] text-slate-400 font-bold block uppercase tracking-wider truncate">Top Beer</span>
+            <span className="text-xs font-extrabold text-slate-850 truncate block" title={metrics.topBeer}>
+              {metrics.topBeer}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Pint Leaderboard - Full Width */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 space-y-4" id="leaderboard-card">
+        <div className="border-b border-slate-100 pb-3.5 flex justify-between items-center">
+          <div>
+            <h3 className="text-sm font-extrabold text-slate-800 tracking-tight flex items-center gap-1.5">
+              <TrendingUp className="w-4 h-4 text-amber-500" />
+              The Ledger
+            </h3>
+            <p className="text-[11px] text-slate-400 mt-0.5 font-normal">Total pints recorded by community regulars in The Ledger within the filtered period</p>
+          </div>
+          <span className="text-[10px] text-amber-600 font-extrabold bg-amber-50 border border-amber-200/50 px-2.5 py-1 rounded-full uppercase tracking-wider">
+            Ledger Totals
+          </span>
+        </div>
+
+        {userComparisonData.length === 0 ? (
+          <div className="py-12 text-center text-slate-400 italic">No logs within filtered period</div>
+        ) : (
+          <div className="space-y-3">
+            {userComparisonData.map((user, idx) => {
+              const maxPints = Math.max(...userComparisonData.map((u) => u.Pints), 1);
+              const percentage = (user.Pints / maxPints) * 100;
+              const userProfile = filteredUsers.find((u) => u.username === user.name);
+              const rank = idx + 1;
+              
+              // Get custom medal or rank badge (Gold, Silver, Bronze)
+              const getRankBadge = (r: number) => {
+                if (r === 1) return <span className="flex items-center justify-center w-7 h-7 rounded-full bg-yellow-100 text-yellow-600 font-extrabold text-sm shadow-sm border border-yellow-300/80 animate-bounce-slow">🥇</span>;
+                if (r === 2) return <span className="flex items-center justify-center w-7 h-7 rounded-full bg-slate-100 text-slate-600 font-extrabold text-sm shadow-sm border border-slate-300">🥈</span>;
+                if (r === 3) return <span className="flex items-center justify-center w-7 h-7 rounded-full bg-amber-700/10 text-amber-800 font-extrabold text-sm shadow-sm border border-amber-700/30">🥉</span>;
+                return <span className="flex items-center justify-center w-7 h-7 rounded-full bg-slate-50 text-slate-400 font-extrabold text-xs border border-slate-200">#{r}</span>;
+              };
+
+              // Determine special row styles for podium positions
+              const getRowStyles = (r: number) => {
+                if (r === 1) return "border-yellow-300/50 bg-gradient-to-r from-yellow-50/30 via-amber-50/15 to-transparent hover:from-yellow-50/40 hover:via-amber-50/25";
+                if (r === 2) return "border-slate-250 bg-gradient-to-r from-slate-50/40 to-transparent hover:from-slate-50/60";
+                if (r === 3) return "border-orange-200/40 bg-gradient-to-r from-orange-50/10 to-transparent hover:from-orange-50/20";
+                return "border-slate-150 bg-slate-50/10 hover:bg-slate-50";
+              };
+
+              return (
+                <div 
+                  key={user.name} 
+                  className={`group flex flex-col md:flex-row md:items-center gap-4 p-3.5 border rounded-xl transition-all duration-200 hover:shadow-sm cursor-pointer ${getRowStyles(rank)}`}
+                  onClick={() => onViewProfileRequested?.(user.name)}
+                >
+                  {/* Rank, Avatar, & Name info */}
+                  <div className="flex items-center gap-3 shrink-0 md:w-52">
+                    <div className="shrink-0">{getRankBadge(rank)}</div>
+                    <UserAvatar username={user.name} users={filteredUsers} className="w-9 h-9 text-lg" />
+                    <div className="min-w-0">
+                      <h4 className="font-extrabold text-slate-800 text-xs truncate group-hover:underline">{user.name}</h4>
+                      <p className="text-[10px] text-amber-600 font-bold uppercase tracking-wider truncate" title={getMostDrankBeerForUser(user.name, filteredPubLogs)}>
+                        {getMostDrankBeerForUser(user.name, filteredPubLogs) === "No beers logged yet" ? "Pub Regular" : `Fav: ${getMostDrankBeerForUser(user.name, filteredPubLogs).split(" (")[0]}`}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Progress bar (Takes up flexible space in the center on desktop) */}
+                  <div className="flex-1 min-w-0 flex flex-col justify-center">
+                    <div className="flex justify-between items-center mb-1 md:hidden">
+                      <span className="text-[10px] text-slate-400 font-bold uppercase">Progress</span>
+                      <span className="font-extrabold text-amber-600 text-xs">{user.Pints} {user.Pints === 1 ? 'pint' : 'pints'}</span>
+                    </div>
+                    
+                    <div className="w-full bg-slate-200/70 h-2 rounded-full overflow-hidden relative">
+                      <div 
+                        className="h-full rounded-full transition-all duration-500 ease-out" 
+                        style={{ 
+                          width: `${percentage}%`,
+                          backgroundColor: COLORS[idx % COLORS.length]
+                        }}
+                      />
+                    </div>
+                  </div>
+                  
+                  {/* Stats (Pints Count & Averages on the right side) */}
+                  <div className="flex items-center justify-between md:justify-end gap-6 shrink-0 md:w-[380px] pt-2.5 md:pt-0 border-t border-slate-150 md:border-t-0 mt-1 md:mt-0">
+                    {/* Desktop Pints Counter */}
+                    <div className="hidden md:block text-right min-w-[70px]">
+                      <span className="text-[10px] text-slate-400 font-bold block uppercase tracking-wider">Pints</span>
+                      <span className="font-extrabold text-slate-800 text-sm">
+                        {user.Pints}
+                      </span>
+                    </div>
+
+                    {/* Pints per day */}
+                    <div className="text-left md:text-right min-w-[80px]">
+                      <span className="text-[10px] text-slate-400 font-bold block uppercase tracking-wider">Pints / Day</span>
+                      <span className="font-extrabold text-slate-800 text-sm">
+                        {user.avgPintsPerDay}
+                      </span>
+                    </div>
+
+                    {/* Average Rating */}
+                    <div className="text-left md:text-right min-w-[80px]">
+                      <span className="text-[10px] text-slate-400 font-bold block uppercase tracking-wider">Avg Rating</span>
+                      <span className="font-extrabold text-amber-500 text-sm flex items-center gap-1 justify-start md:justify-end">
+                        <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+                        {user["Avg Rating"] > 0 ? `${user["Avg Rating"]}` : "N/A"}
+                      </span>
+                    </div>
+
+                    {/* Average ABV */}
+                    <div className="text-right min-w-[70px]">
+                      <span className="text-[10px] text-slate-400 font-bold block uppercase tracking-wider">Avg ABV</span>
+                      <span className="font-extrabold text-slate-700 text-sm">
+                        {user["Avg ABV"] > 0 ? `${user["Avg ABV"]}%` : "N/A"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Graphs Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Graph 1: Line Chart Timeline (A Pint in Time) */}
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-slate-100 pb-3">
+            <div>
+              <h3 className="text-sm font-bold text-slate-800">A Pint in Time</h3>
+              <p className="text-[11px] text-slate-400 mt-0.5 font-normal">Cumulative pints logged over time</p>
+            </div>
+          </div>
+
+          {/* Compact Responsive Graph Key / Legend */}
+          {usersWithBeerOnGraph.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 p-1.5 bg-slate-50/80 border border-slate-200/70 rounded-lg">
+              <span className="text-[9px] font-extrabold uppercase tracking-wider text-slate-400 mr-0.5 pl-1">Key:</span>
+              {usersWithBeerOnGraph.map((user) => {
+                const index = selectedUsers.indexOf(user);
+                const color = COLORS[index % COLORS.length];
+                const userPintsCount = filteredLogs.filter(l => l.user === user).length;
+                return (
+                  <div 
+                    key={user} 
+                    className="flex items-center gap-1.5 px-2 py-0.5 bg-white border border-slate-200/80 rounded-md text-[11px] font-medium text-slate-700 shadow-2xs"
+                  >
+                    <span 
+                      className="w-2 h-2 rounded-full shrink-0" 
+                      style={{ backgroundColor: color }}
+                    />
+                    <UserAvatar username={user} users={filteredUsers} className="w-4 h-4 text-[9px] shrink-0" />
+                    <span className="font-bold text-slate-800">{user}</span>
+                    <span className="text-[9px] font-bold text-slate-500 bg-slate-100 px-1 py-0.2 rounded">
+                      {userPintsCount}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          
+          <div className="h-64 text-xs font-semibold">
+            {filteredLogs.length === 0 ? (
+              <div className="h-full flex items-center justify-center text-slate-400 italic">No logs within filtered period</div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={timelineChartData} margin={{ top: 15, right: 15, left: -20, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={true} stroke="#e2e8f0" />
+                  <XAxis 
+                    dataKey="date" 
+                    stroke="#475569" 
+                    tickLine={{ stroke: '#475569', strokeWidth: 1.5 }}
+                    axisLine={{ stroke: '#94a3b8', strokeWidth: 1.5 }}
+                    tick={{ fontSize: 11, fill: '#334155', fontWeight: 700 }}
+                  />
+                  <YAxis 
+                    allowDecimals={false} 
+                    stroke="#475569" 
+                    tickLine={{ stroke: '#475569', strokeWidth: 1.5 }}
+                    axisLine={{ stroke: '#94a3b8', strokeWidth: 1.5 }}
+                    tick={{ fontSize: 11, fill: '#334155', fontWeight: 700 }}
+                  />
+                  <Tooltip 
+                    formatter={(val: any, name: any) => {
+                      const rounded = Math.round(Number(val));
+                      return [`${rounded} ${rounded === 1 ? 'pint' : 'pints'}`, name];
+                    }}
+                    contentStyle={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', boxShadow: '0 1px 3px 0 rgb(0 0 0 / 0.1)' }}
+                    labelStyle={{ fontWeight: 'bold', color: '#1e293b' }}
+                  />
+                  {usersWithBeerOnGraph.map((user) => {
+                    const index = selectedUsers.indexOf(user);
+                    return (
+                      <Line
+                        key={user}
+                        type="monotone"
+                        dataKey={user}
+                        stroke={COLORS[index % COLORS.length]}
+                        strokeWidth={2.5}
+                        dot={false}
+                        activeDot={{ r: 5 }}
+                        name={`${user}'s Pints`}
+                      />
+                    );
+                  })}
+                </LineChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </div>
+
+        {/* Graph 2: Classic pie breakdown of Guinness vs other beers */}
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 space-y-4">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <div>
+              <h3 className="text-sm font-bold text-slate-800">Was it a Guinness?</h3>
+              <p className="text-[11px] text-slate-400 mt-0.5 font-normal">Ratio of good to bad decision making</p>
+            </div>
+            {/* Elegant Guinness-inspired Golden Irish Harp SVG logo */}
+            <div className="flex items-center justify-center p-1 bg-slate-900 rounded-lg shadow-sm border border-slate-800 shrink-0">
+              <svg className="w-8 h-8 text-amber-500" viewBox="0 0 100 100" fill="currentColor">
+                <path d="M30 15 C 45 15, 65 25, 75 45 C 80 55, 75 75, 70 85 L 65 85 C 68 75, 72 58, 67 48 C 60 35, 45 28, 30 25 L 30 15 Z" />
+                <path d="M26 12 L 32 12 L 32 88 L 26 88 Z" />
+                <path d="M32 82 L 70 85 L 70 88 L 32 88 Z" />
+                <line x1="32" y1="30" x2="45" y2="34" stroke="currentColor" strokeWidth="2" opacity="0.8" />
+                <line x1="32" y1="38" x2="52" y2="43" stroke="currentColor" strokeWidth="2" opacity="0.8" />
+                <line x1="32" y1="46" x2="58" y2="52" stroke="currentColor" strokeWidth="2" opacity="0.8" />
+                <line x1="32" y1="54" x2="62" y2="61" stroke="currentColor" strokeWidth="2" opacity="0.8" />
+                <line x1="32" y1="62" x2="65" y2="70" stroke="currentColor" strokeWidth="2" opacity="0.8" />
+                <line x1="32" y1="70" x2="67" y2="78" stroke="currentColor" strokeWidth="2" opacity="0.8" />
+              </svg>
+            </div>
+          </div>
+
+          <div className="flex flex-col items-center justify-center py-2">
+            {filteredLogs.length === 0 ? (
+              <div className="w-full h-56 flex items-center justify-center text-slate-400 italic">No logs within filtered period</div>
+            ) : (() => {
+              const totalBeers = filteredLogs.length;
+              const guinnessCount = filteredLogs.filter(log => log.beerName && log.beerName.toLowerCase().includes("guinness")).length;
+              const otherCount = totalBeers - guinnessCount;
+              const guinnessPercent = totalBeers > 0 ? Math.round((guinnessCount / totalBeers) * 100) : 0;
+              const otherPercent = totalBeers > 0 ? 100 - guinnessPercent : 0;
+              
+              // Gauge logic:
+              // angle goes from 180 degrees (0% - Left) to 0 degrees (100% - Right)
+              const angleDegrees = 180 - (guinnessPercent / 100) * 180;
+              const angleRad = (angleDegrees * Math.PI) / 180;
+              const cx = 100;
+              const cy = 100;
+              const needleLen = 58;
+              const nx = cx + needleLen * Math.cos(angleRad);
+              const ny = cy - needleLen * Math.sin(angleRad);
+
+              // Zone and funny messages
+              let ratingTitle = "";
+              let ratingDesc = "";
+              let ratingColorClass = "";
+              let ratingBg = "";
+              let ratingBorder = "";
+
+              if (guinnessPercent < 25) {
+                ratingTitle = "Really Bad";
+                ratingDesc = "🚨 Muddy and flat choices! Go find a pint of the black stuff immediately.";
+                ratingColorClass = "text-rose-500 dark:text-rose-400";
+                ratingBg = "bg-rose-500/5 dark:bg-rose-500/5";
+                ratingBorder = "border-rose-500/10";
+              } else if (guinnessPercent >= 25 && guinnessPercent < 75) {
+                ratingTitle = "Adequate";
+                ratingDesc = "⚖️ Average. Tolerable balance, but your soul still yearns for more creamy foam.";
+                ratingColorClass = "text-amber-500 dark:text-amber-400";
+                ratingBg = "bg-amber-500/5 dark:bg-amber-500/5";
+                ratingBorder = "border-amber-500/10";
+              } else {
+                ratingTitle = "Creamy Goodness";
+                ratingDesc = "✨ Stout Heaven! Absolute velvet perfection in your decision making.";
+                ratingColorClass = "text-emerald-500 dark:text-emerald-400";
+                ratingBg = "bg-emerald-500/5 dark:bg-emerald-500/5";
+                ratingBorder = "border-emerald-500/10";
+              }
+              
+              return (
+                <div className="w-full flex flex-col items-center">
+                  {/* Gauge Widget */}
+                  <div className="w-full max-w-[280px] aspect-[1.8/1] relative flex items-center justify-center">
+                    <svg className="w-full h-full overflow-visible" viewBox="0 0 200 120">
+                      {/* Definitions for gorgeous gold and guinness gradients */}
+                      <defs>
+                        <linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                          <stop offset="0%" stopColor="#C5A059" />
+                          <stop offset="50%" stopColor="#E2C58F" />
+                          <stop offset="100%" stopColor="#8A662D" />
+                        </linearGradient>
+                        <linearGradient id="guinnessGaugeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                          <stop offset="0%" stopColor="#7E7770" /> {/* Dull muddy gray-brown */}
+                          <stop offset="45%" stopColor="#4A4139" /> {/* Muddy transition */}
+                          <stop offset="75%" stopColor="#1E1B18" /> {/* Creamy Stout Black */}
+                          <stop offset="100%" stopColor="#0B0908" /> {/* Rich stout black */}
+                        </linearGradient>
+                        <linearGradient id="goldRimGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                          <stop offset="0%" stopColor="#94A3B8" /> {/* Dull gray rim at start */}
+                          <stop offset="50%" stopColor="#D97706" /> {/* Warm amber/gold */}
+                          <stop offset="100%" stopColor="#FBBF24" /> {/* Bright premium gold */}
+                        </linearGradient>
+                        <filter id="gaugeShadow" x="-10%" y="-10%" width="120%" height="120%">
+                          <feDropShadow dx="0" dy="2" stdDeviation="2" floodOpacity="0.15" />
+                        </filter>
+                      </defs>
+
+                      {/* Gauge Arcs */}
+                      {/* Background / Empty Track underlay */}
+                      <path
+                        d="M 30,100 A 70,70 0 0,1 170,100"
+                        fill="none"
+                        stroke="#f1f5f9"
+                        strokeWidth="11"
+                        strokeLinecap="round"
+                        className="dark:stroke-slate-800/40"
+                      />
+
+                      {/* Single Guinness continuous gradient track representing the story from flat to stout */}
+                      <path
+                        d="M 30,100 A 70,70 0 0,1 170,100"
+                        fill="none"
+                        stroke="url(#guinnessGaugeGrad)"
+                        strokeWidth="11"
+                        strokeLinecap="round"
+                      />
+
+                      {/* Concentric premium thin golden outer rim */}
+                      <path
+                        d="M 24,100 A 76,76 0 0,1 176,100"
+                        fill="none"
+                        stroke="url(#goldRimGrad)"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                        opacity="0.9"
+                      />
+
+                      {/* Concentric premium thin golden inner rim */}
+                      <path
+                        d="M 36,100 A 64,64 0 0,1 164,100"
+                        fill="none"
+                        stroke="url(#goldRimGrad)"
+                        strokeWidth="1"
+                        strokeLinecap="round"
+                        opacity="0.4"
+                      />
+
+                      {/* Center Needle & Pivot */}
+                      <g filter="url(#gaugeShadow)">
+                        {/* Needle */}
+                        <line
+                          x1={cx}
+                          y1={cy}
+                          x2={nx}
+                          y2={ny}
+                          stroke="#C5A059"
+                          strokeWidth="3.5"
+                          strokeLinecap="round"
+                        />
+                        <line
+                          x1={cx}
+                          y1={cy}
+                          x2={nx}
+                          y2={ny}
+                          stroke="#1E1B18"
+                          strokeWidth="1"
+                          strokeLinecap="round"
+                        />
+                        {/* Needle Pivot Center */}
+                        <circle cx={cx} cy={cy} r="8" fill="url(#goldGrad)" />
+                        <circle cx={cx} cy={cy} r="4" fill="#1E1B18" />
+                        <circle cx={cx} cy={cy} r="1.5" fill="#FDFBF7" />
+                      </g>
+
+                      {/* Gauge Labels & Ticks */}
+                      <text x="21" y="118" textAnchor="middle" className="text-[9px] font-extrabold fill-slate-400 dark:fill-slate-500 uppercase tracking-wider">0%</text>
+                      <text x="179" y="118" textAnchor="middle" className="text-[9px] font-extrabold fill-slate-400 dark:fill-slate-500 uppercase tracking-wider">100%</text>
+                      
+                      {/* Floating percentage readout moved higher and styled with goldGrad gradient */}
+                      <text x="100" y="15" textAnchor="middle" fill="url(#goldGrad)" className="text-[22px] font-black font-mono tracking-tight">{guinnessPercent}%</text>
+                    </svg>
+                  </div>
+
+                  {/* Playful rating review banner */}
+                  <div className={`w-full max-w-sm mt-2 p-3 rounded-xl border ${ratingBg} ${ratingBorder} text-center shadow-sm`}>
+                    <p className="text-xs font-bold text-slate-700 dark:text-slate-300 leading-relaxed font-sans">
+                      {ratingDesc}
+                    </p>
+                  </div>
+                  
+                  {/* Beautiful, High-Contrast Custom Legend/Details */}
+                  <div className="w-full mt-4 flex flex-col gap-2 max-w-sm mx-auto">
+                    {/* Creamy Pint of Guinness (Correct Choice) */}
+                    <div className="flex items-center justify-between p-3 rounded-xl bg-amber-500/5 dark:bg-amber-500/5 border border-amber-500/15 shadow-sm transition-all">
+                      <div className="flex items-center gap-3">
+                        <span className="w-4 h-4 rounded-md shrink-0 bg-[#FDFBF7] border-2 border-[#C5A059] shadow-sm flex items-center justify-center">
+                          <span className="w-1.5 h-1.5 rounded-sm bg-[#C5A059]" />
+                        </span>
+                        <div className="flex flex-col">
+                          <span className="font-extrabold text-xs text-slate-800 dark:text-slate-100 font-sans tracking-tight">Creamy Pint of Guinness</span>
+                          <span className="text-[10px] text-amber-600 dark:text-amber-500 font-bold uppercase tracking-wider">Creamy Goodness 🍻</span>
+                        </div>
+                      </div>
+                      <div className="text-right flex flex-col items-end">
+                        <span className="font-mono text-xs font-black text-slate-800 dark:text-slate-100">{guinnessCount} {guinnessCount === 1 ? "pint" : "pints"}</span>
+                        <span className="font-sans text-[10px] text-amber-600 dark:text-amber-500 font-bold">{guinnessPercent}%</span>
+                      </div>
+                    </div>
+
+                    {/* Not a Guinness (Flat & Muddy) */}
+                    <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50 dark:bg-slate-900/40 border border-slate-100 dark:border-slate-800/80 shadow-sm transition-all opacity-85">
+                      <div className="flex items-center gap-3">
+                        <span className="w-4 h-4 rounded-md shrink-0 bg-[#7E7770] border-2 border-[#645F5A] shadow-sm flex items-center justify-center">
+                          <span className="w-1.5 h-1.5 rounded-sm bg-[#645F5A]" />
+                        </span>
+                        <div className="flex flex-col">
+                          <span className="font-extrabold text-xs text-slate-600 dark:text-slate-300 font-sans tracking-tight">Not a Guinness</span>
+                          <span className="text-[10px] text-slate-400 dark:text-slate-500 font-bold uppercase tracking-wider">Flat & Muddy 🌧️</span>
+                        </div>
+                      </div>
+                      <div className="text-right flex flex-col items-end">
+                        <span className="font-mono text-xs font-bold text-slate-500 dark:text-slate-400">{otherCount} {otherCount === 1 ? "pint" : "pints"}</span>
+                        <span className="font-sans text-[10px] text-slate-400 font-bold">{otherPercent}%</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      </div>
+        </>
+      )}
+    </div>
+  );
+}

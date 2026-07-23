@@ -1,0 +1,6 @@
+{
+  "name": "Beer real",
+  "description": "A collaborative social platform for friends to log beer tastings, view live activity streams, cheer each other, and compare drinking habits with beautiful, filterable statistics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,620 @@
+import React, { useState, useRef, useEffect } from "react";
+import { motion, AnimatePresence } from "motion/react";
+import { Camera, Star, X, Check, Loader2, Award, Percent, MessageSquare, RefreshCw, Sparkles, Plus } from "lucide-react";
+import { BeerLog, UserProfile } from "../types";
+import { PRELOADED_BEERS, PreloadedBeer, normalizeBeerName, searchBeers } from "../data/beerCatalog";
+import { compressAndResizeImage } from "../utils";
+
+interface QuickLogWorkflowProps {
+  isOpen: boolean;
+  onClose: () => void;
+  logs: BeerLog[];
+  currentUser: string;
+  selectedPubId?: string;
+  onLogAdded: (newLog: BeerLog) => void;
+  onLogUpdated: (updatedLog: BeerLog) => void;
+  editLog?: BeerLog | null; // If provided, opens straight to the enrichment/edit screen!
+}
+
+export default function QuickLogWorkflow({
+  isOpen,
+  onClose,
+  logs,
+  currentUser,
+  selectedPubId,
+  onLogAdded,
+  onLogUpdated,
+  editLog = null,
+}: QuickLogWorkflowProps) {
+  // Main states
+  const [step, setStep] = useState<"capture" | "preview" | "enrich">("capture");
+  const [capturedPhoto, setCapturedPhoto] = useState<string | null>(null);
+  const [isProcessingPhoto, setIsProcessingPhoto] = useState(false);
+  const [isSubmittingLog, setIsSubmittingLog] = useState(false);
+  const [isSavingEnrichment, setIsSavingEnrichment] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [activeLog, setActiveLog] = useState<BeerLog | null>(null);
+
+  // Enrichment fields
+  const [beerName, setBeerName] = useState("");
+  const [beerStyle, setBeerStyle] = useState("IPA");
+  const [abv, setAbv] = useState<string>("");
+  const [rating, setRating] = useState<number>(0);
+  const [comment, setComment] = useState("");
+  const [hadCig, setHadCig] = useState(false);
+
+  // Autocomplete state
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [isAutofilled, setIsAutofilled] = useState(false);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const autocompleteRef = useRef<HTMLDivElement>(null);
+
+  // Dynamic list of available beers from catalog + previous user logs
+  const availableBeers = React.useMemo(() => {
+    const map = new Map<string, PreloadedBeer>();
+    PRELOADED_BEERS.forEach((beer) => {
+      map.set(beer.name.toLowerCase().trim(), beer);
+    });
+    logs.forEach((log) => {
+      if (log.beerName) {
+        const key = log.beerName.toLowerCase().trim();
+        if (!map.has(key)) {
+          map.set(key, {
+            name: log.beerName.trim(),
+            style: log.beerStyle || "Lager",
+            abv: (log.abv || 5.0).toString()
+          });
+        }
+      }
+    });
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [logs]);
+
+  // Handle Edit vs New Log flow initialization
+  useEffect(() => {
+    if (isOpen) {
+      if (editLog) {
+        // Step 4: Edit Mode
+        setActiveLog(editLog);
+        setBeerName(editLog.beerName || "");
+        setBeerStyle(editLog.beerStyle || "IPA");
+        setAbv(editLog.abv > 0 ? editLog.abv.toString() : "");
+        setRating(editLog.rating || 0);
+        setComment(editLog.comment || "");
+        setHadCig(!!editLog.hadCig);
+        setStep("enrich");
+      } else {
+        // Step 1: Trigger camera automatically on open!
+        resetFields();
+        setStep("capture");
+        setTimeout(() => {
+          triggerCamera();
+        }, 100);
+      }
+    }
+  }, [isOpen, editLog]);
+
+  const resetFields = () => {
+    setCapturedPhoto(null);
+    setActiveLog(null);
+    setBeerName("");
+    setBeerStyle("IPA");
+    setAbv("");
+    setRating(0);
+    setComment("");
+    setHadCig(false);
+    setError(null);
+  };
+
+  const triggerCamera = () => {
+    setError(null);
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      const isImage = file.type.startsWith("image/") || /\.(jpg|jpeg|png|webp|gif|heic|heif)$/i.test(file.name);
+      if (!isImage) {
+        setError("Please upload or take a valid image file.");
+        return;
+      }
+
+      setIsProcessingPhoto(true);
+      setError(null);
+      try {
+        const base64 = await compressAndResizeImage(file);
+        setCapturedPhoto(base64);
+        setStep("preview");
+      } catch (err) {
+        console.error(err);
+        setError("Failed to process photo. Please try again.");
+        setStep("capture");
+      } finally {
+        setIsProcessingPhoto(false);
+      }
+    }
+  };
+
+  // Step 2: Instant Post!
+  const handleInstantPost = async () => {
+    if (!capturedPhoto) {
+      setError("No photo available to post!");
+      return;
+    }
+
+    setIsSubmittingLog(true);
+    setError(null);
+
+    // Instant Post payload: defaults are set to ensure valid backend schema but unskews stats!
+    const payload = {
+      user: currentUser || "Anonymous",
+      beerName: "Unnamed Pint",
+      beerStyle: "Unspecified",
+      abv: 0,
+      rating: 0,
+      comment: "",
+      imageUrl: capturedPhoto,
+      hadCig: false,
+      date: new Date().toISOString(),
+      pubId: selectedPubId && selectedPubId !== "global" && selectedPubId !== "all" ? selectedPubId : undefined,
+    };
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+    try {
+      const response = await fetch("/api/beers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error("Could not post pint log.");
+      }
+
+      const createdLog: BeerLog = await response.json();
+      onLogAdded(createdLog); // Triggers realtime sync & feed updates immediately!
+      setActiveLog(createdLog);
+      
+      // Post succeeded! Instantly transition to the Optional Enrichment page
+      setStep("enrich");
+    } catch (err: any) {
+      console.error(err);
+      setError("Could not submit post. Please try again.");
+    } finally {
+      setIsSubmittingLog(false);
+    }
+  };
+
+  // Step 3: Save Optional Enrichment Details
+  const handleSaveEnrichment = async () => {
+    if (!activeLog) return;
+
+    setIsSavingEnrichment(true);
+    setError(null);
+
+    const normalized = normalizeBeerName(beerName);
+    const cleanedName = normalized.name || beerName.trim() || "Unnamed Pint";
+    const numericAbv = abv ? parseFloat(abv) : (normalized.abv || 0);
+
+    // Payload for updating details
+    const payload = {
+      beerName: cleanedName,
+      beerStyle: (beerStyle && beerStyle !== "Unspecified") ? beerStyle : (normalized.style || "Lager"),
+      abv: isNaN(numericAbv) ? 0 : numericAbv,
+      rating: rating,
+      comment: comment.trim(),
+      hadCig: hadCig,
+    };
+
+    try {
+      const response = await fetch(`/api/beers/${activeLog.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to save beer details.");
+      }
+
+      const updatedLog: BeerLog = await response.json();
+      onLogUpdated(updatedLog); // Updates locally & in state right away!
+      onClose(); // Seamlessly dismisses modal
+    } catch (err: any) {
+      console.error(err);
+      setError("Saved to feed, but could not update enrichment details.");
+    } finally {
+      setIsSavingEnrichment(false);
+    }
+  };
+
+  // Close suggestions box on click outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (autocompleteRef.current && !autocompleteRef.current.contains(event.target as Node)) {
+        setShowSuggestions(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  const handleBeerNameType = (val: string) => {
+    setBeerName(val);
+    setShowSuggestions(true);
+    const normalized = normalizeBeerName(val);
+    const matchedBeer = availableBeers.find(
+      (b) => b.name.toLowerCase() === val.trim().toLowerCase() || b.name.toLowerCase() === normalized.name.toLowerCase()
+    );
+    if (matchedBeer) {
+      setBeerStyle(matchedBeer.style);
+      setAbv(matchedBeer.abv);
+      setIsAutofilled(true);
+    } else if (normalized.style && normalized.abv) {
+      setBeerStyle(normalized.style);
+      setAbv(normalized.abv.toString());
+      setIsAutofilled(true);
+    } else {
+      setIsAutofilled(false);
+    }
+  };
+
+  const selectSuggestion = (beer: PreloadedBeer) => {
+    setBeerName(beer.name);
+    setBeerStyle(beer.style);
+    setAbv(beer.abv);
+    setIsAutofilled(true);
+    setShowSuggestions(false);
+  };
+
+  const filteredSuggestions = React.useMemo(() => {
+    return searchBeers(availableBeers, beerName, 40);
+  }, [beerName, availableBeers]);
+
+  if (!isOpen) return null;
+
+  return (
+    <AnimatePresence>
+      <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-4">
+        {/* Modal Window */}
+        <motion.div
+          initial={{ opacity: 0, scale: 0.95, y: 15 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          exit={{ opacity: 0, scale: 0.95, y: 15 }}
+          className="relative bg-white dark:bg-slate-900 rounded-3xl max-w-md w-full overflow-hidden border border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col"
+        >
+          {/* Header */}
+          <div className="p-5 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="p-2 rounded-xl bg-amber-500/10 text-amber-500">
+                {step === "enrich" ? <Sparkles className="w-5 h-5" /> : <Camera className="w-5 h-5" />}
+              </span>
+              <div>
+                <h2 className="font-extrabold text-slate-800 dark:text-white text-md">
+                  {step === "capture" && "Camera"}
+                  {step === "preview" && "Preview"}
+                  {step === "enrich" && (editLog ? "Edit Pint Details" : "Enrich Your Pint")}
+                </h2>
+                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">
+                  {step === "preview" && "Ready to share?"}
+                  {step === "enrich" && (editLog ? "Update log details" : "Fully optional details")}
+                  {step === "capture" && "Snap your pint"}
+                </p>
+              </div>
+            </div>
+
+            {/* Close Button / Cancel */}
+            <button
+              onClick={onClose}
+              className="p-1.5 rounded-lg bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-400 transition-all focus:outline-none"
+              title="Close"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* Body Content */}
+          <div className="p-6 overflow-y-auto max-h-[75vh]">
+            {error && (
+              <div className="mb-4 bg-red-50 dark:bg-red-950/20 text-red-600 dark:text-red-400 p-3.5 rounded-xl border border-red-200 dark:border-red-900/40 text-xs font-semibold">
+                ⚠️ {error}
+              </div>
+            )}
+
+            {/* Step 1: Capture State */}
+            {step === "capture" && (
+              <div className="flex flex-col items-center justify-center p-8 space-y-4">
+                <div className="w-20 h-20 bg-amber-500/10 text-amber-500 rounded-full flex items-center justify-center animate-pulse">
+                  <Camera className="w-10 h-10" />
+                </div>
+                <div className="text-center">
+                  <h3 className="font-bold text-slate-700 dark:text-slate-300">Opening Camera...</h3>
+                  <p className="text-xs text-slate-400 mt-1 max-w-[250px] mx-auto">
+                    Take a fresh photo of your pint to post immediately!
+                  </p>
+                </div>
+                
+                {isProcessingPhoto ? (
+                  <div className="flex flex-col items-center justify-center gap-2 mt-4">
+                    <Loader2 className="w-6 h-6 text-amber-500 animate-spin" />
+                    <span className="text-xs text-slate-400">Processing photo...</span>
+                  </div>
+                ) : (
+                  <button
+                    onClick={triggerCamera}
+                    className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white text-xs font-bold rounded-xl shadow-md transition-all cursor-pointer flex items-center gap-2"
+                  >
+                    <RefreshCw className="w-4 h-4" /> Try Camera Again
+                  </button>
+                )}
+
+                {/* Hidden File Input */}
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  accept="image/*"
+                  capture="environment"
+                  onChange={handleFileChange}
+                  className="hidden"
+                />
+              </div>
+            )}
+
+            {/* Step 2: Photo Preview & Instant Post */}
+            {step === "preview" && capturedPhoto && (
+              <div className="space-y-6">
+                <div className="relative rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 max-h-72 w-full flex items-center justify-center shadow-md">
+                  <img
+                    src={capturedPhoto}
+                    alt="Captured pint preview"
+                    className="object-cover max-h-72 w-full"
+                    referrerPolicy="no-referrer"
+                  />
+                  
+                  <button
+                    onClick={triggerCamera}
+                    className="absolute bottom-3 right-3 bg-slate-900/80 backdrop-blur-sm text-white p-2 rounded-xl text-xs font-bold hover:bg-slate-900 transition-all flex items-center gap-1 border border-white/10"
+                    title="Retake photo"
+                  >
+                    <Camera className="w-4 h-4" /> Retake
+                  </button>
+                </div>
+
+                {/* Single main instant post button */}
+                <button
+                  onClick={handleInstantPost}
+                  disabled={isSubmittingLog}
+                  className="w-full bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white font-extrabold py-3.5 px-4 rounded-xl shadow-lg shadow-amber-500/20 focus:outline-none disabled:opacity-50 transition-all flex items-center justify-center gap-2 cursor-pointer text-sm tracking-wide uppercase"
+                >
+                  {isSubmittingLog ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      Posting Instant Pint...
+                    </>
+                  ) : (
+                    <>
+                      🚀 POST INSTANTLY
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
+
+            {/* Step 3: Optional Enrichment */}
+            {step === "enrich" && (
+              <div className="space-y-5">
+                {!editLog && (
+                  <div className="p-3 bg-emerald-50 dark:bg-emerald-950/15 border border-emerald-100 dark:border-emerald-900/40 rounded-xl flex items-center gap-2.5 text-emerald-800 dark:text-emerald-400 text-xs font-semibold">
+                    <Check className="w-4 h-4 shrink-0 bg-emerald-500 text-white rounded-full p-0.5" />
+                    <span>Pint logged live! You can skip this or add details below.</span>
+                  </div>
+                )}
+
+                {/* 1. What are you drinking (Autocomplete Catalog) */}
+                <div className="relative" ref={autocompleteRef}>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-400">
+                      What are you drinking?
+                    </label>
+                    <span className="text-[10px] text-amber-600 dark:text-amber-400 font-bold">
+                      {availableBeers.length} Catalog Beers Available
+                    </span>
+                  </div>
+
+                  <input
+                    type="text"
+                    autoComplete="off"
+                    placeholder="Search catalog: Guinness, Modelo, Heady Topper..."
+                    value={beerName}
+                    onChange={(e) => handleBeerNameType(e.target.value)}
+                    onFocus={() => setShowSuggestions(true)}
+                    className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/10 focus:border-amber-500 text-slate-800 dark:text-white font-medium"
+                  />
+
+                  {/* Autocomplete suggestions dropdown */}
+                  {showSuggestions && filteredSuggestions.length > 0 && (
+                    <div className="absolute left-0 right-0 mt-1.5 bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl shadow-2xl z-30 max-h-56 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-900">
+                      <div className="p-2 bg-slate-50 dark:bg-slate-900 text-[10px] font-bold text-slate-400 uppercase tracking-wider sticky top-0 border-b border-slate-100 dark:border-slate-800">
+                        {beerName.trim() ? "Catalog Search Results" : "Popular Catalog Beers"}
+                      </div>
+                      {filteredSuggestions.map((beer) => (
+                        <button
+                          key={beer.name}
+                          type="button"
+                          onClick={() => selectSuggestion(beer)}
+                          className="w-full text-left px-4 py-2.5 hover:bg-amber-50 dark:hover:bg-amber-950/20 transition-colors flex items-center justify-between group cursor-pointer"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="text-base">🍺</span>
+                            <span className="text-xs font-bold text-slate-800 dark:text-slate-200 group-hover:text-amber-500">
+                              {beer.name}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1.5 text-[10px] text-slate-500 dark:text-slate-400">
+                            <span className="bg-slate-100 dark:bg-slate-800 group-hover:bg-amber-100 dark:group-hover:bg-amber-900/40 px-1.5 py-0.5 rounded font-medium">
+                              {beer.style}
+                            </span>
+                            <span className="font-extrabold text-amber-600 dark:text-amber-400">
+                              {beer.abv}% ABV
+                            </span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Quick-Select Chips */}
+                  <div className="mt-2 flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar text-xs">
+                    <span className="text-[10px] text-slate-400 font-bold shrink-0">Popular:</span>
+                    {[
+                      { name: "Guinness Draught", style: "Stout", abv: "4.2" },
+                      { name: "Modelo Especial", style: "Lager", abv: "4.4" },
+                      { name: "Estrella Galicia", style: "Lager", abv: "5.5" },
+                      { name: "Pacifico Clara", style: "Lager", abv: "4.5" },
+                      { name: "Firestone Walker 805", style: "Lager", abv: "4.7" },
+                      { name: "Blue Moon Belgian White", style: "Wheat", abv: "5.4" },
+                      { name: "Heady Topper", style: "IPA", abv: "8.0" }
+                    ].map((chip) => (
+                      <button
+                        key={chip.name}
+                        type="button"
+                        onClick={() => selectSuggestion(chip)}
+                        className="shrink-0 px-2 py-1 bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 dark:text-amber-300 text-[11px] font-bold rounded-md border border-amber-500/20 transition-all flex items-center gap-1 cursor-pointer"
+                      >
+                        <span>🍺</span>
+                        <span>{chip.name.split(" ")[0]}</span>
+                        <span className="text-[9px] opacity-75">{chip.abv}%</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  {isAutofilled && (
+                    <p className="text-[10px] text-emerald-600 dark:text-emerald-400 font-bold mt-1.5 flex items-center gap-1 animate-pulse">
+                      ✨ Auto-filled style ({beerStyle}) & ABV ({abv}%) from catalog!
+                    </p>
+                  )}
+                </div>
+
+                {/* 2. Rating Star scale */}
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+                    How creamy is this pint?
+                  </label>
+                  <div className="flex flex-col items-center gap-2 p-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl">
+                    <div className="flex items-center gap-1.5">
+                      {[1, 2, 3, 4, 5].map((star) => (
+                        <button
+                          key={star}
+                          type="button"
+                          onClick={() => setRating(star)}
+                          className="p-1 focus:outline-none transition-transform active:scale-90"
+                        >
+                          <Star
+                            className={`w-7 h-7 transition-all ${
+                              star <= rating
+                                ? "fill-amber-400 text-amber-400 scale-110"
+                                : "text-slate-300 dark:text-slate-700"
+                            }`}
+                          />
+                        </button>
+                      ))}
+                    </div>
+                    {rating > 0 && (
+                      <span className="text-[11px] font-extrabold text-amber-500 uppercase tracking-wider">
+                        {rating === 5 && "Bad day to be a Beer 🏆"}
+                        {rating === 4 && "Thats a Creamy Pint! 👍"}
+                        {rating === 3 && "Solid pint. 👌"}
+                        {rating === 2 && "Flat and Warm but still a pint. 👎"}
+                        {rating === 1 && "Filled with Regret 🤮"}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* 3. Caption text field */}
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+                    Caption / Vibe notes
+                  </label>
+                  <textarea
+                    placeholder="Vibe notes, location, who are you with..."
+                    rows={2}
+                    value={comment}
+                    onChange={(e) => setComment(e.target.value)}
+                    className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/10 focus:border-amber-500 text-slate-800 dark:text-white placeholder-slate-400"
+                  />
+                </div>
+
+                {/* 4. ABV - optional number field (collapsible / secondary) */}
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5 flex items-center justify-between">
+                    <span>ABV (%)</span>
+                    <span className="text-[9px] text-slate-400 normal-case font-medium">Optional, enter if known</span>
+                  </label>
+                  <div className="relative">
+                    <Percent className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
+                    <input
+                      type="number"
+                      step="0.1"
+                      placeholder="e.g. 4.2"
+                      value={abv}
+                      onChange={(e) => setAbv(e.target.value)}
+                      className="w-full pl-9 pr-4 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/10 focus:border-amber-500 text-slate-800 dark:text-white"
+                    />
+                  </div>
+                </div>
+
+                {/* Dart combo / Cig option */}
+                <div className="flex items-center justify-between p-3.5 bg-amber-500/5 border border-amber-500/10 rounded-xl">
+                  <div className="flex flex-col">
+                    <span className="text-xs font-extrabold text-amber-600 dark:text-amber-400">🚬 Dart Combo Activated?</span>
+                    <span className="text-[9px] text-slate-400 mt-0.5">Did you smoke a cigarette/vape with this pint?</span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={hadCig}
+                    onChange={(e) => setHadCig(e.target.checked)}
+                    className="w-4.5 h-4.5 accent-amber-500 rounded cursor-pointer"
+                  />
+                </div>
+
+                {/* Action buttons (Skip vs Save) */}
+                <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center gap-3">
+                  {/* Skip Option */}
+                  {!editLog && (
+                    <button
+                      type="button"
+                      onClick={onClose}
+                      className="flex-1 px-4 py-3 bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-350 font-bold rounded-xl text-xs transition-colors cursor-pointer text-center"
+                    >
+                      Skip / Skip Details
+                    </button>
+                  )}
+
+                  <button
+                    onClick={handleSaveEnrichment}
+                    disabled={isSavingEnrichment}
+                    className="flex-1 px-4 py-3 bg-emerald-500 hover:bg-emerald-600 text-white font-bold rounded-xl text-xs shadow-md shadow-emerald-500/10 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                  >
+                    {isSavingEnrichment ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Check className="w-4 h-4" />
+                    )}
+                    {editLog ? "Save Changes" : "Save Details"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </motion.div>
+      </div>
+    </AnimatePresence>
+  );
+}
